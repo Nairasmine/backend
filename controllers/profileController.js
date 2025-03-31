@@ -1,0 +1,105 @@
+const { db } = require('../config/db');
+
+const profileController = {
+  // Retrieves the current user's profile details, including download history.
+  async getProfile(req, res) {
+    const userId = req.user.id; // Provided by the authentication middleware
+    try {
+      // Retrieve the user record including the profile_pic BLOB.
+      const [users] = await db.query(
+        `SELECT id, username, email, role, created_at, last_login, profile_pic 
+         FROM users 
+         WHERE id = ?`,
+        [userId]
+      );
+
+      if (!users || users.length === 0) {
+        return res.status(404).json({ message: 'User not found.' });
+      }
+      const user = users[0];
+
+      // Convert profile_pic binary data to a Base64 string if available.
+      user.profilePicBase64 = user.profile_pic ? user.profile_pic.toString('base64') : null;
+
+      // Remove the raw binary field from the response.
+      delete user.profile_pic;
+
+      // Query the download_history for this user with the pdf_title.
+      const [downloads] = await db.query(
+        `SELECT id, pdf_id, pdf_title, downloaded_at, ip_address, user_agent 
+         FROM download_history 
+         WHERE user_id = ?`,
+        [userId]
+      );
+
+      // Attach the download history to the user object.
+      user.downloadHistory = downloads;
+
+      res.status(200).json(user);
+    } catch (error) {
+      console.error('Error fetching profile:', error);
+      res.status(500).json({ message: 'Error fetching profile.' });
+    }
+  },
+
+  // Updates the current user's profile.
+  async updateProfile(req, res) {
+    const userId = req.user.id;
+    const { username, email } = req.body;
+
+    // Ensure both username and email are provided.
+    if (!username || !email) {
+      return res.status(400).json({ message: 'Username and email are required.' });
+    }
+
+    try {
+      // If a new profile picture is provided (e.g., via Multer), update it.
+      if (req.file && req.file.buffer) {
+        await db.query(
+          `UPDATE users SET username = ?, email = ?, profile_pic = ? WHERE id = ?`,
+          [username, email, req.file.buffer, userId]
+        );
+      } else {
+        // Otherwise, update only the username and email.
+        await db.query(
+          `UPDATE users SET username = ?, email = ? WHERE id = ?`,
+          [username, email, userId]
+        );
+      }
+      res.status(200).json({ message: 'Profile updated successfully.' });
+    } catch (error) {
+      console.error('Error updating profile:', error);
+      res.status(500).json({ message: 'Error updating profile.' });
+    }
+  },
+
+  // Retrieves the user's separate download and upload history.
+  // (This endpoint can be used if you want history on its own.)
+  async getHistory(req, res) {
+    const userId = req.user.id;
+    try {
+      // Query download history including the pdf_title.
+      const [downloads] = await db.query(
+        `SELECT id, pdf_id, pdf_title, downloaded_at, ip_address, user_agent 
+         FROM download_history 
+         WHERE user_id = ?`,
+        [userId]
+      );
+
+      // Query upload history.
+      const [uploads] = await db.query(
+        `SELECT id, title, created_at 
+         FROM pdfs 
+         WHERE user_id = ? AND status = 'active'`,
+        [userId]
+      );
+
+      res.status(200).json({ downloads, uploads });
+    } catch (error) {
+      console.error('Error fetching history:', error);
+      res.status(500).json({ message: 'Error fetching history.' });
+    }
+  }
+};
+
+module.exports = profileController;
