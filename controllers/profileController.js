@@ -7,7 +7,7 @@ const profileController = {
     try {
       // Retrieve the user record including the profile_pic BLOB.
       const [users] = await db.query(
-        `SELECT id, username, email, role, created_at, last_login, profile_pic 
+        `SELECT id, username, email, role, created_at, last_login, profile_pic, overall_rating 
          FROM users 
          WHERE id = ?`,
         [userId]
@@ -20,7 +20,6 @@ const profileController = {
 
       // Convert profile_pic binary data to a Base64 string if available.
       user.profilePicBase64 = user.profile_pic ? user.profile_pic.toString('base64') : null;
-
       // Remove the raw binary field from the response.
       delete user.profile_pic;
 
@@ -73,8 +72,14 @@ const profileController = {
     }
   },
 
-  // Retrieves the user's separate download and upload history.
-  // (This endpoint can be used if you want history on its own.)
+  /**
+   * Retrieves the user's download history and the upload (PDF) history with performance metrics.
+   * The upload history includes for each PDF:
+   *  - download_count
+   *  - average_rating (based on ratings in pdf_ratings)
+   *  - the number of ratings (rating_count)
+   * In addition, aggregated overall metrics are computed.
+   */
   async getHistory(req, res) {
     const userId = req.user.id;
     try {
@@ -86,20 +91,50 @@ const profileController = {
         [userId]
       );
 
-      // Query upload history.
+      // Query upload history along with metrics from the pdf_ratings table.
       const [uploads] = await db.query(
-        `SELECT id, title, created_at 
-         FROM pdfs 
-         WHERE user_id = ? AND status = 'active'`,
+        `
+        SELECT 
+          p.id,
+          p.title,
+          p.download_count,
+          p.created_at,
+          COALESCE(AVG(pr.rating), 0) AS average_rating,
+          COUNT(pr.id) AS rating_count
+        FROM pdfs p
+        LEFT JOIN pdf_ratings pr ON p.id = pr.pdf_id
+        WHERE p.user_id = ? AND p.status = 'active'
+        GROUP BY p.id
+        ORDER BY p.created_at DESC
+        `,
         [userId]
       );
 
-      res.status(200).json({ downloads, uploads });
+      // Aggregate overall performance metrics across all uploads.
+      let totalDownloads = 0;
+      let totalRatingsSum = 0;
+      let totalRatingsCount = 0;
+      uploads.forEach((pdf) => {
+        totalDownloads += parseInt(pdf.download_count, 10) || 0;
+        totalRatingsSum += (parseFloat(pdf.average_rating) * pdf.rating_count) || 0;
+        totalRatingsCount += pdf.rating_count || 0;
+      });
+      const overallAverageRating =
+        totalRatingsCount > 0 ? (totalRatingsSum / totalRatingsCount).toFixed(2) : 'N/A';
+
+      res.status(200).json({
+        downloads,
+        uploads,
+        overallMetrics: {
+          totalDownloads,
+          overallAverageRating,
+        },
+      });
     } catch (error) {
       console.error('Error fetching history:', error);
       res.status(500).json({ message: 'Error fetching history.' });
     }
-  }
+  },
 };
 
 module.exports = profileController;

@@ -13,14 +13,14 @@ router.get('/', authenticateToken, profileController.getProfile);
 
 /**
  * PUT /api/profile
- * Updates the current user's profile. If a file is uploaded on "profilePic",
- * the profile picture will be updated.
+ * Updates the current user's profile.
+ * If a file is uploaded on "profilePic", the profile picture will be updated.
  */
 router.put('/', authenticateToken, upload.single('profilePic'), profileController.updateProfile);
 
 /**
  * GET /api/profile/history
- * Retrieves the user's download and upload history.
+ * Retrieves the user's download and upload history, along with performance metrics.
  */
 router.get('/history', authenticateToken, profileController.getHistory);
 

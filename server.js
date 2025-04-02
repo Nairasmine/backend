@@ -6,6 +6,7 @@ const authRoutes = require('./routes/authRoutes');
 const pdfRoutes = require('./routes/pdfRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const usersRoutes = require('./routes/usersRoutes'); // New: Users routes
+const bookmarkRoutes = require('./routes/bookmarkRoutes'); // New: Bookmarks routes
 
 const app = express();
 
@@ -14,11 +15,12 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Mount routes with an /api base path
+// Mount routes with the /api base path
 app.use('/api/auth', authRoutes);
 app.use('/api/pdf', pdfRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/users', usersRoutes); // New: Mount users route
+app.use('/api/bookmarks', bookmarkRoutes); // New: Mount bookmarks route
 
 // A base API route for sanity check
 app.get('/api', (req, res) => {

@@ -105,6 +105,19 @@ const initializeDatabase = async () => {
       )
     `);
 
+    // Create bookmarks table to allow users to save PDFs for later reference
+    await promisePool.query(`
+      CREATE TABLE IF NOT EXISTS bookmarks (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        pdf_id INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_bookmark (user_id, pdf_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (pdf_id) REFERENCES pdfs(id) ON DELETE CASCADE
+      )
+    `);
+
     // Create default admin user if not exists
     const hashedPassword = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'Okikiokiki123@', 10);
     await promisePool.query(`
@@ -277,10 +290,67 @@ const helpers = {
       console.error('Error in searchPdfs:', error);
       throw error;
     }
+  },
+
+  // ---- Bookmark Helper Functions ----
+
+  /**
+   * Create a bookmark for a given user and PDF.
+   * Uses INSERT IGNORE to avoid duplicate entries.
+   */
+  async bookmarkPdf(userId, pdfId) {
+    try {
+      const insertQuery = `
+        INSERT IGNORE INTO bookmarks (user_id, pdf_id)
+        VALUES (?, ?)
+      `;
+      const [result] = await promisePool.query(insertQuery, [userId, pdfId]);
+      return result;
+    } catch (error) {
+      console.error('Error in bookmarkPdf:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Remove a bookmark for a given user and PDF.
+   */
+  async removeBookmark(userId, pdfId) {
+    try {
+      const deleteQuery = `
+        DELETE FROM bookmarks 
+        WHERE user_id = ? AND pdf_id = ?
+      `;
+      const [result] = await promisePool.query(deleteQuery, [userId, pdfId]);
+      return result;
+    } catch (error) {
+      console.error('Error in removeBookmark:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Retrieve all bookmarked PDFs for a given user.
+   * Joins the bookmarks and pdfs tables to return PDF details.
+   */
+  async getBookmarks(userId) {
+    try {
+      const selectQuery = `
+        SELECT b.*, p.title, p.description, p.file_name, p.created_at, p.updated_at
+        FROM bookmarks b
+        INNER JOIN pdfs p ON b.pdf_id = p.id
+        WHERE b.user_id = ?
+      `;
+      const [rows] = await promisePool.query(selectQuery, [userId]);
+      return rows;
+    } catch (error) {
+      console.error('Error in getBookmarks:', error);
+      throw error;
+    }
   }
 };
 
-// Initialize database
+// Initialize database and log any errors
 initializeDatabase().catch(console.error);
 
 module.exports = {
