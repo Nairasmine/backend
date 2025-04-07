@@ -23,7 +23,7 @@ const promisePool = pool.promise();
 // Initialize database and tables
 const initializeDatabase = async () => {
   try {
-    // Create users table (now with overall_rating)
+    // Create users table
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -41,7 +41,7 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Create pdfs table with binary PDF data and cover photo
+    // Create pdfs table
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS pdfs (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -57,9 +57,30 @@ const initializeDatabase = async () => {
         updated_at TIMESTAMP NULL ON UPDATE CURRENT_TIMESTAMP,
         download_count INT DEFAULT 0,
         status ENUM('active', 'deleted') DEFAULT 'active',
-        visibility ENUM('public', 'private') DEFAULT 'public',
+        visibility ENUM('public', 'private', 'paid') DEFAULT 'public',
         tags JSON,
+        is_paid BOOLEAN DEFAULT FALSE,
+        price DECIMAL(10,2) DEFAULT 0.00,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Create purchases table
+    await promisePool.query(`
+      CREATE TABLE IF NOT EXISTS purchases (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        pdf_id INT NOT NULL,
+        purchase_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        amount DECIMAL(10, 2) NOT NULL,
+        payment_method VARCHAR(50),
+        transaction_id VARCHAR(100),
+        status ENUM('pending', 'completed', 'failed', 'refunded') DEFAULT 'completed',
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (pdf_id) REFERENCES pdfs(id) ON DELETE CASCADE,
+        INDEX (user_id),
+        INDEX (pdf_id),
+        INDEX (transaction_id)
       )
     `);
 
@@ -90,7 +111,7 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Create download_history table with pdf_title column added
+    // Create download_history table
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS download_history (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -105,7 +126,7 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Create bookmarks table to allow users to save PDFs for later reference
+    // Create bookmarks table
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS bookmarks (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -175,21 +196,17 @@ const helpers = {
   },
 
   async recordDownload(pdfId, userId, req) {
-    // Get a connection from the promisePool.
     const connection = await promisePool.getConnection();
     try {
-      // Begin a transaction so both the insert into history and update count happen together.
       await connection.beginTransaction();
   
-      // Retrieve the PDF title from the pdfs table.
       const [titleRows] = await connection.query(
         'SELECT title FROM pdfs WHERE id = ?',
         [pdfId]
       );
       const pdfTitle = titleRows.length > 0 ? titleRows[0].title : 'Unknown Title';
   
-      // Insert a record into the download_history table including the PDF title.
-      const insertQuery = `
+      await connection.query(`
         INSERT INTO download_history (
           pdf_id,
           pdf_title,
@@ -197,8 +214,7 @@ const helpers = {
           ip_address,
           user_agent
         ) VALUES (?, ?, ?, ?, ?)
-      `;
-      await connection.query(insertQuery, [
+      `, [
         pdfId,
         pdfTitle,
         userId,
@@ -206,23 +222,18 @@ const helpers = {
         req.headers['user-agent'] || 'unknown'
       ]);
   
-      // Update the pdfs table to increment the download count.
-      const updateQuery = `
+      await connection.query(`
         UPDATE pdfs 
         SET download_count = download_count + 1 
         WHERE id = ?
-      `;
-      await connection.query(updateQuery, [pdfId]);
+      `, [pdfId]);
   
-      // Commit the transaction.
       await connection.commit();
     } catch (error) {
-      // Rollback if any error occurs.
       await connection.rollback();
       console.error('Error in recordDownload:', error);
       throw error;
     } finally {
-      // Release the connection back to the pool.
       connection.release();
     }
   },
@@ -292,19 +303,12 @@ const helpers = {
     }
   },
 
-  // ---- Bookmark Helper Functions ----
-
-  /**
-   * Create a bookmark for a given user and PDF.
-   * Uses INSERT IGNORE to avoid duplicate entries.
-   */
   async bookmarkPdf(userId, pdfId) {
     try {
-      const insertQuery = `
+      const [result] = await promisePool.query(`
         INSERT IGNORE INTO bookmarks (user_id, pdf_id)
         VALUES (?, ?)
-      `;
-      const [result] = await promisePool.query(insertQuery, [userId, pdfId]);
+      `, [userId, pdfId]);
       return result;
     } catch (error) {
       console.error('Error in bookmarkPdf:', error);
@@ -312,16 +316,12 @@ const helpers = {
     }
   },
 
-  /**
-   * Remove a bookmark for a given user and PDF.
-   */
   async removeBookmark(userId, pdfId) {
     try {
-      const deleteQuery = `
+      const [result] = await promisePool.query(`
         DELETE FROM bookmarks 
         WHERE user_id = ? AND pdf_id = ?
-      `;
-      const [result] = await promisePool.query(deleteQuery, [userId, pdfId]);
+      `, [userId, pdfId]);
       return result;
     } catch (error) {
       console.error('Error in removeBookmark:', error);
@@ -329,22 +329,78 @@ const helpers = {
     }
   },
 
-  /**
-   * Retrieve all bookmarked PDFs for a given user.
-   * Joins the bookmarks and pdfs tables to return PDF details.
-   */
   async getBookmarks(userId) {
     try {
-      const selectQuery = `
+      const [rows] = await promisePool.query(`
         SELECT b.*, p.title, p.description, p.file_name, p.created_at, p.updated_at
         FROM bookmarks b
         INNER JOIN pdfs p ON b.pdf_id = p.id
         WHERE b.user_id = ?
-      `;
-      const [rows] = await promisePool.query(selectQuery, [userId]);
+      `, [userId]);
       return rows;
     } catch (error) {
       console.error('Error in getBookmarks:', error);
+      throw error;
+    }
+  },
+
+  async recordPurchase(userId, pdfId, amount, paymentMethod = 'unknown', transactionId = null) {
+    try {
+      const [result] = await promisePool.query(`
+        INSERT INTO purchases 
+          (user_id, pdf_id, amount, payment_method, transaction_id, status)
+        VALUES (?, ?, ?, ?, ?, 'completed')
+      `, [userId, pdfId, amount, paymentMethod, transactionId]);
+      return result;
+    } catch (error) {
+      console.error('Error recording purchase:', error);
+      throw error;
+    }
+  },
+
+  async getUserPurchases(userId) {
+    try {
+      const [rows] = await promisePool.query(`
+        SELECT 
+          p.*, 
+          pdf.title, 
+          pdf.description, 
+          pdf.cover_photo,
+          u.username as author_username
+        FROM purchases p
+        JOIN pdfs pdf ON p.pdf_id = pdf.id
+        JOIN users u ON pdf.user_id = u.id
+        WHERE p.user_id = ?
+        ORDER BY p.purchase_date DESC
+      `, [userId]);
+      return rows;
+    } catch (error) {
+      console.error('Error getting user purchases:', error);
+      throw error;
+    }
+  },
+
+  async getPurchasedPdfs(userId) {
+    try {
+      const [rows] = await promisePool.query(`
+        SELECT 
+          pdf.*,
+          u.username as author_username,
+          u.profile_pic as author_profile_pic,
+          p.purchase_date,
+          p.amount,
+          COALESCE(AVG(pr.rating), 0) as average_rating
+        FROM purchases p
+        JOIN pdfs pdf ON p.pdf_id = pdf.id
+        JOIN users u ON pdf.user_id = u.id
+        LEFT JOIN pdf_ratings pr ON pdf.id = pr.pdf_id
+        WHERE p.user_id = ? AND p.status = 'completed'
+        GROUP BY pdf.id, p.purchase_date, p.amount
+        ORDER BY p.purchase_date DESC
+      `, [userId]);
+      return rows;
+    } catch (error) {
+      console.error('Error getting purchased PDFs:', error);
       throw error;
     }
   }

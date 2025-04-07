@@ -1,5 +1,6 @@
 const express = require('express');
 const profileController = require('../controllers/profileController');
+const pdfController = require('../controllers/pdfController');
 const authenticateToken = require('../middleware/authenticateToken');
 const upload = require('../middleware/upload'); // Multer middleware configured with memory storage
 
@@ -23,5 +24,7 @@ router.put('/', authenticateToken, upload.single('profilePic'), profileControlle
  * Retrieves the user's download and upload history, along with performance metrics.
  */
 router.get('/history', authenticateToken, profileController.getHistory);
+
+router.get('/purchased', authenticateToken, pdfController.getPurchasedPdfs);
 
 module.exports = router;
