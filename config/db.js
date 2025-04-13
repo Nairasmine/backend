@@ -1,3 +1,5 @@
+// config/db.js
+
 const mysql = require('mysql2');
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
@@ -72,7 +74,7 @@ const initializeDatabase = async () => {
         user_id INT NOT NULL,
         pdf_id INT NOT NULL,
         purchase_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        amount DECIMAL(10, 2) NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
         payment_method VARCHAR(50),
         transaction_id VARCHAR(100),
         status ENUM('pending', 'completed', 'failed', 'refunded') DEFAULT 'completed',
@@ -139,14 +141,14 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Create default admin user if not exists
+    // Insert default admin user if not exists
     const hashedPassword = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'Okikiokiki123@', 10);
     await promisePool.query(`
       INSERT IGNORE INTO users (
-        username, 
-        password, 
-        role, 
-        email, 
+        username,
+        password,
+        role,
+        email,
         created_at,
         status
       ) VALUES (?, ?, 'admin', ?, NOW(), 'active')
@@ -170,15 +172,34 @@ const helpers = {
     return CURRENT_USER;
   },
 
+  async updateDownloadCount(pdfId) {
+    try {
+      const [result] = await promisePool.query(
+        `
+        UPDATE pdfs
+        SET download_count = download_count + 1
+        WHERE id = ?
+      `,
+        [pdfId]
+      );
+      console.log(`Download count updated for PDF ID: ${pdfId}`);
+      return result;
+    } catch (error) {
+      console.error('Error in updateDownloadCount:', error);
+      throw error;
+    }
+  },
+
   async getPdfWithDetails(pdfId) {
     try {
-      const [rows] = await promisePool.query(`
+      const [rows] = await promisePool.query(
+        `
         SELECT 
           p.*,
-          u.username as uploaded_by,
-          COUNT(DISTINCT dh.id) as download_count,
-          COALESCE(AVG(pr.rating), 0) as average_rating,
-          COUNT(DISTINCT c.id) as comment_count
+          u.username AS uploaded_by,
+          COUNT(DISTINCT dh.id) AS download_count,
+          COALESCE(AVG(pr.rating), 0) AS average_rating,
+          COUNT(DISTINCT c.id) AS comment_count
         FROM pdfs p
         LEFT JOIN users u ON p.user_id = u.id
         LEFT JOIN download_history dh ON p.id = dh.pdf_id
@@ -186,8 +207,9 @@ const helpers = {
         LEFT JOIN comments c ON p.id = c.pdf_id
         WHERE p.id = ? AND p.status = 'active'
         GROUP BY p.id
-      `, [pdfId]);
-      
+      `,
+        [pdfId]
+      );
       return rows[0];
     } catch (error) {
       console.error('Error in getPdfWithDetails:', error);
@@ -199,35 +221,41 @@ const helpers = {
     const connection = await promisePool.getConnection();
     try {
       await connection.beginTransaction();
-  
+
       const [titleRows] = await connection.query(
         'SELECT title FROM pdfs WHERE id = ?',
         [pdfId]
       );
       const pdfTitle = titleRows.length > 0 ? titleRows[0].title : 'Unknown Title';
-  
-      await connection.query(`
-        INSERT INTO download_history (
-          pdf_id,
-          pdf_title,
-          user_id,
-          ip_address,
-          user_agent
-        ) VALUES (?, ?, ?, ?, ?)
-      `, [
-        pdfId,
-        pdfTitle,
-        userId,
-        req.ip,
-        req.headers['user-agent'] || 'unknown'
-      ]);
-  
-      await connection.query(`
-        UPDATE pdfs 
-        SET download_count = download_count + 1 
-        WHERE id = ?
-      `, [pdfId]);
-  
+
+      await connection.query(
+        `
+          INSERT INTO download_history (
+            pdf_id,
+            pdf_title,
+            user_id,
+            ip_address,
+            user_agent
+          ) VALUES (?, ?, ?, ?, ?)
+        `,
+        [
+          pdfId,
+          pdfTitle,
+          userId,
+          req.ip,
+          req.headers['user-agent'] || 'unknown'
+        ]
+      );
+
+      await connection.query(
+        `
+          UPDATE pdfs 
+          SET download_count = download_count + 1 
+          WHERE id = ?
+        `,
+        [pdfId]
+      );
+
       await connection.commit();
     } catch (error) {
       await connection.rollback();
@@ -305,10 +333,13 @@ const helpers = {
 
   async bookmarkPdf(userId, pdfId) {
     try {
-      const [result] = await promisePool.query(`
+      const [result] = await promisePool.query(
+        `
         INSERT IGNORE INTO bookmarks (user_id, pdf_id)
         VALUES (?, ?)
-      `, [userId, pdfId]);
+      `,
+        [userId, pdfId]
+      );
       return result;
     } catch (error) {
       console.error('Error in bookmarkPdf:', error);
@@ -318,10 +349,13 @@ const helpers = {
 
   async removeBookmark(userId, pdfId) {
     try {
-      const [result] = await promisePool.query(`
+      const [result] = await promisePool.query(
+        `
         DELETE FROM bookmarks 
         WHERE user_id = ? AND pdf_id = ?
-      `, [userId, pdfId]);
+      `,
+        [userId, pdfId]
+      );
       return result;
     } catch (error) {
       console.error('Error in removeBookmark:', error);
@@ -331,12 +365,15 @@ const helpers = {
 
   async getBookmarks(userId) {
     try {
-      const [rows] = await promisePool.query(`
+      const [rows] = await promisePool.query(
+        `
         SELECT b.*, p.title, p.description, p.file_name, p.created_at, p.updated_at
         FROM bookmarks b
         INNER JOIN pdfs p ON b.pdf_id = p.id
         WHERE b.user_id = ?
-      `, [userId]);
+      `,
+        [userId]
+      );
       return rows;
     } catch (error) {
       console.error('Error in getBookmarks:', error);
@@ -346,11 +383,13 @@ const helpers = {
 
   async recordPurchase(userId, pdfId, amount, paymentMethod = 'unknown', transactionId = null) {
     try {
-      const [result] = await promisePool.query(`
-        INSERT INTO purchases 
-          (user_id, pdf_id, amount, payment_method, transaction_id, status)
+      const [result] = await promisePool.query(
+        `
+        INSERT INTO purchases (user_id, pdf_id, amount, payment_method, transaction_id, status)
         VALUES (?, ?, ?, ?, ?, 'completed')
-      `, [userId, pdfId, amount, paymentMethod, transactionId]);
+      `,
+        [userId, pdfId, amount, paymentMethod, transactionId]
+      );
       return result;
     } catch (error) {
       console.error('Error recording purchase:', error);
@@ -358,9 +397,32 @@ const helpers = {
     }
   },
 
+  async recordPurchaseAlt(purchaseData) {
+    try {
+      const query = `
+        INSERT INTO purchases 
+          (user_id, pdf_id, amount, payment_method, transaction_id, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `;
+      const [result] = await promisePool.query(query, [
+        purchaseData.user_id,
+        purchaseData.pdf_id,
+        purchaseData.amount,
+        purchaseData.payment_method,
+        purchaseData.transaction_id,
+        purchaseData.status
+      ]);
+      return result;
+    } catch (error) {
+      console.error('Error in recordPurchaseAlt:', error);
+      throw error;
+    }
+  },
+
   async getUserPurchases(userId) {
     try {
-      const [rows] = await promisePool.query(`
+      const [rows] = await promisePool.query(
+        `
         SELECT 
           p.*, 
           pdf.title, 
@@ -372,7 +434,9 @@ const helpers = {
         JOIN users u ON pdf.user_id = u.id
         WHERE p.user_id = ?
         ORDER BY p.purchase_date DESC
-      `, [userId]);
+      `,
+        [userId]
+      );
       return rows;
     } catch (error) {
       console.error('Error getting user purchases:', error);
@@ -380,33 +444,26 @@ const helpers = {
     }
   },
 
-  async getPurchasedPdfs(userId) {
+  async recordPurchase({ user_id, pdf_id, amount, payment_method, transaction_id, status }) {
     try {
-      const [rows] = await promisePool.query(`
-        SELECT 
-          pdf.*,
-          u.username as author_username,
-          u.profile_pic as author_profile_pic,
-          p.purchase_date,
-          p.amount,
-          COALESCE(AVG(pr.rating), 0) as average_rating
-        FROM purchases p
-        JOIN pdfs pdf ON p.pdf_id = pdf.id
-        JOIN users u ON pdf.user_id = u.id
-        LEFT JOIN pdf_ratings pr ON pdf.id = pr.pdf_id
-        WHERE p.user_id = ? AND p.status = 'completed'
-        GROUP BY pdf.id, p.purchase_date, p.amount
-        ORDER BY p.purchase_date DESC
-      `, [userId]);
-      return rows;
+      const [result] = await promisePool.query(
+        `
+        INSERT INTO purchases (user_id, pdf_id, amount, payment_method, transaction_id, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `,
+        [user_id, pdf_id, amount, payment_method, transaction_id, status]
+      );
+      console.log(`Purchase recorded for User ID: ${user_id}, PDF ID: ${pdf_id}`);
+      return result;
     } catch (error) {
-      console.error('Error getting purchased PDFs:', error);
+      console.error('Error recording purchase:', error);
       throw error;
     }
-  }
+  }  
+
 };
 
-// Initialize database and log any errors
+// Initialize database
 initializeDatabase().catch(console.error);
 
 module.exports = {

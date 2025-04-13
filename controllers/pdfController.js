@@ -1,11 +1,14 @@
+// controllers/pdfController.js
+require('dotenv').config(); // Load environment variables
 const pdfModel = require('../models/pdfModel');
 const multer = require('multer');
-const axios = require('axios'); // Make sure to require axios
+const axios = require('axios');
 
-// Use memory storage so that files are kept in memory.
+// Define API_BASE_URL for any needed internal references
+const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:5000/api';
+
+// --- Multer configuration for file upload ---
 const storage = multer.memoryStorage();
-
-// File filter: only allow files for the "pdf" and "cover_photo" fields.
 const fileFilter = (req, file, cb) => {
   if (file.fieldname === 'pdf' || file.fieldname === 'cover_photo') {
     cb(null, true);
@@ -13,11 +16,10 @@ const fileFilter = (req, file, cb) => {
     cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', file.fieldname));
   }
 };
-
 const upload = multer({ storage, fileFilter });
 
 const pdfController = {
-  // Middleware: Process multiple file fields
+  // Middleware: Process multiple file fields for file uploads
   uploadFile: upload.fields([
     { name: 'pdf', maxCount: 1 },
     { name: 'cover_photo', maxCount: 1 }
@@ -76,18 +78,14 @@ const pdfController = {
       
       // Process each PDF to include payment information correctly
       const pdfsWithProfile = pdfs.map(pdf => {
-        // Convert profilePic to base64 if exists
         if (pdf.profilePic) {
           pdf.profilePicBase64 = pdf.profilePic.toString('base64');
         } else {
           pdf.profilePicBase64 = null;
         }
         delete pdf.profilePic;
-        
-        // Ensure isPaid is a string and price is a number
         pdf.isPaid = pdf.is_paid ? "true" : "false";
         pdf.price = parseFloat(pdf.price) || 0.00;
-        
         return pdf;
       });
       
@@ -102,14 +100,11 @@ const pdfController = {
   async updatePdf(req, res) {
     const { id } = req.params;
     const { title, description, isPaid, price } = req.body;
-
-    // Validate price for paid PDFs
     const paidStatus = isPaid === 'true';
     const priceValue = parseFloat(price) || 0.00;
     if (paidStatus && priceValue <= 0) {
       return res.status(400).json({ message: 'Price must be greater than 0 for paid PDFs.' });
     }
-
     try {
       await pdfModel.updatePdf(id, { 
         title, 
@@ -146,8 +141,6 @@ const pdfController = {
       }
       
       const pdf = pdfs[0];
-      
-      // Convert profilePic to base64 if exists
       if (pdf.profilePic) {
         pdf.profilePicBase64 = pdf.profilePic.toString('base64');
       } else {
@@ -155,7 +148,6 @@ const pdfController = {
       }
       delete pdf.profilePic;
       
-      // Add payment information
       pdf.isPaid = pdf.is_paid ? "true" : "false";
       pdf.price = parseFloat(pdf.price) || 0.00;
       pdf.rating_percentage = (pdf.average_rating / 5) * 100;
@@ -176,9 +168,7 @@ const pdfController = {
         return res.status(404).json({ message: 'Cover photo not found.' });
       }
       const photoData = results[0].cover_photo;
-      const coverBuffer = Buffer.isBuffer(photoData)
-        ? photoData
-        : Buffer.from(photoData);
+      const coverBuffer = Buffer.isBuffer(photoData) ? photoData : Buffer.from(photoData);
       res.writeHead(200, {
         'Content-Type': 'image/jpeg',
         'Content-Length': coverBuffer.length,
@@ -232,20 +222,15 @@ const pdfController = {
         offset: parseInt(offset) || 0
       });
       
-      // Process each PDF to include payment information correctly
       const rowsWithProfile = rows.map(row => {
-        // Convert profilePic to base64 if exists
         if (row.profilePic) {
           row.profilePicBase64 = row.profilePic.toString('base64');
         } else {
           row.profilePicBase64 = null;
         }
         delete row.profilePic;
-        
-        // Ensure isPaid is a string and price is a number
         row.isPaid = row.is_paid ? "true" : "false";
         row.price = parseFloat(row.price) || 0.00;
-        
         return row;
       });
       
@@ -273,9 +258,8 @@ const pdfController = {
       
       const pdf = results[0];
       
-      // Check if PDF is paid and user has permission
+      // If the PDF is paid, verify if the user has purchased it first
       if (pdf.is_paid) {
-        // Verify if user has purchased this PDF
         const hasPurchased = await pdfModel.checkPurchase(userId, id);
         if (!hasPurchased) {
           return res.status(403).json({ 
@@ -378,16 +362,11 @@ const pdfController = {
     }
     try {
       const bookmarks = await pdfModel.getBookmarks(userId);
-      
-      // Format payment info
-      const formattedBookmarks = bookmarks.map(bookmark => {
-        return {
-          ...bookmark,
-          isPaid: bookmark.is_paid ? "true" : "false",
-          price: parseFloat(bookmark.price) || 0.00
-        };
-      });
-      
+      const formattedBookmarks = bookmarks.map(bookmark => ({
+        ...bookmark,
+        isPaid: bookmark.is_paid ? "true" : "false",
+        price: parseFloat(bookmark.price) || 0.00
+      }));
       res.status(200).json(formattedBookmarks);
     } catch (error) {
       console.error('Error fetching bookmarks:', error);
@@ -403,8 +382,6 @@ const pdfController = {
     }
     try {
       const purchasedPdfs = await pdfModel.getPurchasedPdfs(userId);
-      
-      // Process profile pictures and payment info
       const pdfsWithProfile = purchasedPdfs.map(pdf => {
         if (pdf.profilePic) {
           pdf.profilePicBase64 = pdf.profilePic.toString('base64');
@@ -412,14 +389,10 @@ const pdfController = {
           pdf.profilePicBase64 = null;
         }
         delete pdf.profilePic;
-        
-        // Ensure isPaid is a string and price is a number
         pdf.isPaid = pdf.is_paid ? "true" : "false";
         pdf.price = parseFloat(pdf.price) || 0.00;
-        
         return pdf;
       });
-      
       res.status(200).json(pdfsWithProfile);
     } catch (error) {
       console.error('Error fetching purchased PDFs:', error);
@@ -427,7 +400,7 @@ const pdfController = {
     }
   },
 
-  // Handle PDF purchase
+  // Handle PDF purchase (initialize payment with Paystack)
   async purchasePdf(req, res) {
     const { pdfId } = req.params;
     const userId = req.user && req.user.id;
@@ -437,7 +410,6 @@ const pdfController = {
     }
   
     try {
-      // Verify if the PDF exists and is a paid one
       const pdf = await pdfModel.getPdfDetails(pdfId);
       if (!pdf || pdf.length === 0) {
         return res.status(404).json({ message: 'PDF not found' });
@@ -447,13 +419,12 @@ const pdfController = {
         return res.status(400).json({ message: 'This PDF is free and does not require payment' });
       }
   
-      // Check if the user already purchased the PDF
       const hasPurchased = await pdfModel.checkPurchase(userId, pdfId);
       if (hasPurchased) {
         return res.status(400).json({ message: 'You have already purchased this PDF' });
       }
   
-      // Prepare payment data
+      // Prepare payment data for Paystack
       const paymentData = {
         email: req.user.email,
         amount: Math.round(parseFloat(pdf[0].price) * 100), // Convert to kobo
@@ -465,7 +436,7 @@ const pdfController = {
         callback_url: `${process.env.FRONTEND_URL}/payment-callback`,
       };
   
-      // Call payment gateway (e.g., Paystack API)
+      // Initialize transaction using Paystack API
       const paymentResponse = await axios.post(
         'https://api.paystack.co/transaction/initialize',
         paymentData,
@@ -485,35 +456,55 @@ const pdfController = {
       console.error('Purchase error:', error);
       return res.status(500).json({ message: 'An error occurred during payment initialization' });
     }
-  },  
+  },
 
-  verifyPayment: async (reference) => {
+  // Verify payment using Paystack's verification endpoint
+  async verifyPayment(req, res) {
+    const { reference } = req.body;
+    if (!reference) {
+      return res.status(400).json({ message: 'Payment reference is required.' });
+    }
     try {
-      const response = await fetch(`${API_BASE_URL}/pdf/verify-payment`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ reference }),
-      });
+      // Call Paystack's verification API using axios
+      const verifyResponse = await axios.get(
+        `https://api.paystack.co/transaction/verify/${reference}`,
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json'
+          },
+        }
+      );
   
-      if (!response.ok) {
-        throw new Error(`Payment verification failed with status ${response.status}`);
+      // Check payment status returned by Paystack
+      if (
+        verifyResponse.data &&
+        verifyResponse.data.data &&
+        verifyResponse.data.data.status === 'success'
+      ) {
+        // Optionally, record the purchase in your database here using:
+        // await pdfModel.recordPurchase(...)
+        return res.json({
+          success: true,
+          message: 'Payment verified successfully',
+          data: verifyResponse.data.data,
+        });
+      } else {
+        return res.status(400).json({ success: false, message: 'Payment verification failed.' });
       }
-  
-      const data = await response.json();
-      return data;
     } catch (error) {
       console.error('Error verifying payment:', error.message);
-      throw error; // Re-throw error for proper handling in the UI
+      return res.status(500).json({ message: 'Error verifying payment.' });
     }
-  },  
-
-  // Check purchase status
+  },
+  
+  // Check purchase status for a given PDF by the current user
   async checkPurchase(req, res) {
     const { pdfId } = req.params;
     const userId = req.user?.id;
   
     if (!userId) {
-      return res.status(401).json({ message: 'Unauthorized: User not logged in' });
+      return res.status(401).json({ message: 'Unauthorized: User not logged in.' });
     }
   
     try {
@@ -524,7 +515,6 @@ const pdfController = {
       return res.status(500).json({ message: 'An error occurred while checking the purchase status' });
     }
   }
-  
 };
 
 module.exports = pdfController;
