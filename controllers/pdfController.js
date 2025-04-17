@@ -241,42 +241,49 @@ const pdfController = {
     }
   },
 
-  // Download PDF with payment verification
-  async downloadPdf(req, res) {
-    const { id } = req.params;
-    const userId = req.user && req.user.id;
+  // Download PDF with payment verification (one-time purchase model)
+async downloadPdf(req, res) {
+  const { id } = req.params;
+  const userId = req.user && req.user.id;
+
+  if (!userId) {
+    return res.status(401).json({ message: 'Unauthorized: user not found.' });
+  }
+
+  try {
+    const results = await pdfModel.downloadPdf(id);
+    if (!results || results.length === 0) {
+      return res.status(404).json({ message: 'PDF not found.' });
+    }
+
+    const pdf = results[0];
     
-    if (!userId) {
-      return res.status(401).json({ message: 'Unauthorized: user not found.' });
+    // Determine whether the PDF is marked as paid. This handles booleans, numbers or string representations.
+    const isPaid = 
+      pdf.is_paid === true ||
+      pdf.is_paid === 1 ||
+      pdf.is_paid === 'true';
+
+    // For paid PDFs, verify that the user has purchased the PDF (one-time purchase record)
+    if (isPaid) {
+      const hasPurchased = await pdfModel.checkPurchase(userId, id);
+      if (!hasPurchased) {
+        return res.status(403).json({
+          message: 'This is a paid PDF. Please purchase to download.',
+          price: Number(pdf.price) || 0.00
+        });
+      }
     }
     
-    try {
-      const results = await pdfModel.downloadPdf(id);
-      if (!results || results.length === 0) {
-        return res.status(404).json({ message: 'PDF not found.' });
-      }
-      
-      const pdf = results[0];
-      
-      // If the PDF is paid, verify if the user has purchased it first
-      if (pdf.is_paid) {
-        const hasPurchased = await pdfModel.checkPurchase(userId, id);
-        if (!hasPurchased) {
-          return res.status(403).json({ 
-            message: 'This is a paid PDF. Please purchase to download.',
-            price: parseFloat(pdf.price) || 0.00
-          });
-        }
-      }
-      
-      res.setHeader('Content-Disposition', `attachment; filename="${pdf.file_name}"`);
-      res.setHeader('Content-Type', pdf.mime_type);
-      res.send(pdf.pdf_data);
-    } catch (error) {
-      console.error('Error downloading PDF:', error);
-      res.status(500).json({ message: 'Error downloading PDF.' });
-    }
-  },
+    // Set headers to initiate a file download
+    res.setHeader('Content-Disposition', `attachment; filename="${pdf.file_name}"`);
+    res.setHeader('Content-Type', pdf.mime_type);
+    return res.send(pdf.pdf_data);
+  } catch (error) {
+    console.error('Error downloading PDF:', error);
+    return res.status(500).json({ message: 'Error downloading PDF.' });
+  }
+},
 
   // Rate PDF
   async ratePdf(req, res) {

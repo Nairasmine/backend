@@ -179,7 +179,7 @@ const helpers = {
         UPDATE pdfs
         SET download_count = download_count + 1
         WHERE id = ?
-      `,
+        `,
         [pdfId]
       );
       console.log(`Download count updated for PDF ID: ${pdfId}`);
@@ -207,7 +207,7 @@ const helpers = {
         LEFT JOIN comments c ON p.id = c.pdf_id
         WHERE p.id = ? AND p.status = 'active'
         GROUP BY p.id
-      `,
+        `,
         [pdfId]
       );
       return rows[0];
@@ -280,10 +280,10 @@ const helpers = {
       let sql = `
         SELECT 
           p.*,
-          u.username as uploaded_by,
-          COUNT(DISTINCT dh.id) as download_count,
-          COALESCE(AVG(pr.rating), 0) as average_rating,
-          COUNT(DISTINCT c.id) as comment_count
+          u.username AS uploaded_by,
+          COUNT(DISTINCT dh.id) AS download_count,
+          COALESCE(AVG(pr.rating), 0) AS average_rating,
+          COUNT(DISTINCT c.id) AS comment_count
         FROM pdfs p
         LEFT JOIN users u ON p.user_id = u.id
         LEFT JOIN download_history dh ON p.id = dh.pdf_id
@@ -291,7 +291,6 @@ const helpers = {
         LEFT JOIN comments c ON p.id = c.pdf_id
         WHERE p.status = 'active'
       `;
-
       const params = [];
 
       if (query) {
@@ -337,7 +336,7 @@ const helpers = {
         `
         INSERT IGNORE INTO bookmarks (user_id, pdf_id)
         VALUES (?, ?)
-      `,
+        `,
         [userId, pdfId]
       );
       return result;
@@ -353,7 +352,7 @@ const helpers = {
         `
         DELETE FROM bookmarks 
         WHERE user_id = ? AND pdf_id = ?
-      `,
+        `,
         [userId, pdfId]
       );
       return result;
@@ -371,7 +370,7 @@ const helpers = {
         FROM bookmarks b
         INNER JOIN pdfs p ON b.pdf_id = p.id
         WHERE b.user_id = ?
-      `,
+        `,
         [userId]
       );
       return rows;
@@ -381,40 +380,39 @@ const helpers = {
     }
   },
 
-  async recordPurchase(userId, pdfId, amount, paymentMethod = 'unknown', transactionId = null) {
+  // Helper to check if a purchase record exists for a given user and PDF.
+  async getPurchaseByUserAndPdf(user_id, pdf_id) {
     try {
-      const [result] = await promisePool.query(
+      const [rows] = await promisePool.query(
         `
-        INSERT INTO purchases (user_id, pdf_id, amount, payment_method, transaction_id, status)
-        VALUES (?, ?, ?, ?, ?, 'completed')
-      `,
-        [userId, pdfId, amount, paymentMethod, transactionId]
+        SELECT * FROM purchases
+        WHERE user_id = ? AND pdf_id = ?
+        LIMIT 1
+        `,
+        [user_id, pdf_id]
       );
-      return result;
+      return rows.length > 0 ? rows[0] : null;
     } catch (error) {
-      console.error('Error recording purchase:', error);
+      console.error('Error in getPurchaseByUserAndPdf:', error);
       throw error;
     }
   },
 
-  async recordPurchaseAlt(purchaseData) {
+  // Record a new purchase using an object with keys: user_id, pdf_id, amount, payment_method, transaction_id, status.
+  async recordPurchase(purchaseData) {
     try {
-      const query = `
-        INSERT INTO purchases 
-          (user_id, pdf_id, amount, payment_method, transaction_id, status)
+      const { user_id, pdf_id, amount, payment_method, transaction_id, status } = purchaseData;
+      const [result] = await promisePool.query(
+        `
+        INSERT INTO purchases (user_id, pdf_id, amount, payment_method, transaction_id, status)
         VALUES (?, ?, ?, ?, ?, ?)
-      `;
-      const [result] = await promisePool.query(query, [
-        purchaseData.user_id,
-        purchaseData.pdf_id,
-        purchaseData.amount,
-        purchaseData.payment_method,
-        purchaseData.transaction_id,
-        purchaseData.status
-      ]);
-      return result;
+        `,
+        [user_id, pdf_id, amount, payment_method, transaction_id, status]
+      );
+      console.log(`Purchase recorded for User ID: ${user_id}, PDF ID: ${pdf_id}`);
+      return { id: result.insertId, ...purchaseData };
     } catch (error) {
-      console.error('Error in recordPurchaseAlt:', error);
+      console.error('Error recording purchase:', error);
       throw error;
     }
   },
@@ -428,13 +426,13 @@ const helpers = {
           pdf.title, 
           pdf.description, 
           pdf.cover_photo,
-          u.username as author_username
+          u.username AS author_username
         FROM purchases p
         JOIN pdfs pdf ON p.pdf_id = pdf.id
         JOIN users u ON pdf.user_id = u.id
         WHERE p.user_id = ?
         ORDER BY p.purchase_date DESC
-      `,
+        `,
         [userId]
       );
       return rows;
@@ -442,25 +440,7 @@ const helpers = {
       console.error('Error getting user purchases:', error);
       throw error;
     }
-  },
-
-  async recordPurchase({ user_id, pdf_id, amount, payment_method, transaction_id, status }) {
-    try {
-      const [result] = await promisePool.query(
-        `
-        INSERT INTO purchases (user_id, pdf_id, amount, payment_method, transaction_id, status)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `,
-        [user_id, pdf_id, amount, payment_method, transaction_id, status]
-      );
-      console.log(`Purchase recorded for User ID: ${user_id}, PDF ID: ${pdf_id}`);
-      return result;
-    } catch (error) {
-      console.error('Error recording purchase:', error);
-      throw error;
-    }
-  }  
-
+  }
 };
 
 // Initialize database
