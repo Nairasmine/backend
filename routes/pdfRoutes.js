@@ -1,14 +1,12 @@
 const express = require('express');
 const pdfController = require('../controllers/pdfController');
 const authenticateToken = require('../middleware/authenticateToken');
-const wrapAsync = require('../utils/wrapAsync'); // Ensure you have this utility
+const wrapAsync = require('../utils/wrapAsync'); // Utility to wrap async routes
 const { param, body, query, validationResult } = require('express-validator');
 
 const router = express.Router();
 
-/* -------------------------------------------------------------------------
-   Middleware for Validation Errors
--------------------------------------------------------------------------*/
+// Middleware for validation errors
 const validate = (validations) => {
   return async (req, res, next) => {
     await Promise.all(validations.map((validation) => validation.run(req)));
@@ -21,7 +19,7 @@ const validate = (validations) => {
 };
 
 /* -------------------------------------------------------------------------
-   Static Routes
+   Static PDF Routes
 -------------------------------------------------------------------------*/
 
 /**
@@ -32,7 +30,7 @@ router.get('/all', authenticateToken, wrapAsync(pdfController.getAllPdfs));
 
 /**
  * GET /api/pdf/search
- * Search PDFs by title, description, and optional paid/free status.
+ * Search PDFs by various filters.
  */
 router.get(
   '/search',
@@ -58,30 +56,34 @@ router.get(
 
 /**
  * POST /api/pdf/upload
- * Upload a new PDF (and an optional cover photo).
+ * Upload a new PDF along with an optional cover photo.
  */
 router.post(
   '/upload',
   authenticateToken,
-  wrapAsync(pdfController.uploadFile), // Handles file upload with Multer
+  wrapAsync(pdfController.uploadFile), // Handles file upload using Multer, for example.
   wrapAsync(pdfController.uploadPdf)
 );
 
 /**
  * POST /api/pdf/history
- * Record download history for a PDF.
+ * Record download history for a specified PDF.
  */
 router.post('/history', authenticateToken, wrapAsync(pdfController.recordHistory));
+
+/* -------------------------------------------------------------------------
+   Purchases & Payment Routes
+-------------------------------------------------------------------------*/
 
 /**
  * GET /api/pdf/purchases
  * Retrieve all purchased PDFs for the authenticated user.
  */
-router.get('/purchases', authenticateToken, wrapAsync(pdfController.getPurchasedPdfs));
-
-/* -------------------------------------------------------------------------
-   Purchase Routes
--------------------------------------------------------------------------*/
+router.get(
+  '/purchases',
+  authenticateToken,
+  wrapAsync(pdfController.getPurchasedPdfs)
+);
 
 /**
  * POST /api/pdf/:id/purchase
@@ -96,7 +98,7 @@ router.post(
 
 /**
  * POST /api/pdf/verify-payment
- * Verify payment completion and grant access.
+ * Verify payment completion and record the purchase.
  */
 router.post(
   '/verify-payment',
@@ -107,7 +109,7 @@ router.post(
 
 /**
  * GET /api/pdf/:id/check-purchase
- * Check if the user has purchased a specified PDF.
+ * Check if the authenticated user has purchased a specified PDF.
  */
 router.get(
   '/:id/check-purchase',
@@ -122,7 +124,7 @@ router.get(
 
 /**
  * POST /api/pdf/:id/bookmark
- * Add a bookmark for a specified PDF.
+ * Add a bookmark to a specified PDF.
  */
 router.post(
   '/:id/bookmark',
@@ -133,7 +135,7 @@ router.post(
 
 /**
  * DELETE /api/pdf/:id/bookmark
- * Remove a bookmark for a specified PDF.
+ * Remove a bookmark from a specified PDF.
  */
 router.delete(
   '/:id/bookmark',
@@ -149,12 +151,12 @@ router.delete(
 router.get('/bookmarks', authenticateToken, wrapAsync(pdfController.getBookmarks));
 
 /* -------------------------------------------------------------------------
-   Dynamic Routes
+   Update, Delete, and Dynamic Content Routes
 -------------------------------------------------------------------------*/
 
 /**
  * PUT /api/pdf/:id
- * Update metadata (title, description, isPaid, and price) for a specified PDF.
+ * Update metadata for a specified PDF.
  */
 router.put(
   '/:id',
@@ -182,7 +184,7 @@ router.delete(
 
 /**
  * GET /api/pdf/:id/comments
- * Retrieve all comments associated with a given PDF.
+ * Retrieve all comments associated with a specified PDF.
  */
 router.get(
   '/:id/comments',
@@ -207,7 +209,7 @@ router.post(
 
 /**
  * POST /api/pdf/:id/comment
- * Add a comment for a specified PDF.
+ * Add a comment to a specified PDF.
  */
 router.post(
   '/:id/comment',
@@ -232,7 +234,7 @@ router.get(
 
 /**
  * GET /api/pdf/:id/uploader
- * Retrieve the uploader's profile picture and username for a specified PDF.
+ * Retrieve the uploader’s info for a specified PDF.
  */
 router.get(
   '/:id/uploader',
