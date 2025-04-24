@@ -25,6 +25,17 @@ router.put('/', authenticateToken, upload.single('profilePic'), profileControlle
  */
 router.get('/history', authenticateToken, profileController.getHistory);
 
+/**
+ * GET /api/profile/upload-permission
+ * Retrieves the upload fee permission status for the current user.
+ */
+router.get('/upload-permission', authenticateToken, profileController.getUploadPermission);
+
+/**
+ * GET /api/profile/purchased
+ * Retrieves the purchased PDFs for the current user.
+ * (Handled by a separate controller: pdfController)
+ */
 router.get('/purchased', authenticateToken, pdfController.getPurchasedPdfs);
 
 module.exports = router;

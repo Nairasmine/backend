@@ -1,4 +1,3 @@
-// config/db.js
 const mysql = require('mysql2');
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
@@ -7,6 +6,7 @@ const path = require('path');
 // --- Constants ---
 const CURRENT_TIMESTAMP = new Date().toISOString();
 const CURRENT_USER = 'Nairasmine';
+const UPLOAD_FEE_IDENTIFIER = -1;
 
 // Create connection pool
 const pool = mysql.createPool({
@@ -23,7 +23,7 @@ const promisePool = pool.promise();
 // Initialize database and tables
 const initializeDatabase = async () => {
   try {
-    // Create users table
+    // Create users table with an additional column for last withdrawal date.
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -37,14 +37,16 @@ const initializeDatabase = async () => {
         overall_rating DECIMAL(3,2) DEFAULT 0,
         status ENUM('active', 'inactive') DEFAULT 'active',
         reset_token VARCHAR(255),
-        reset_token_expires TIMESTAMP NULL
+        reset_token_expires TIMESTAMP NULL,
+        upload_fee_paid TINYINT(1) DEFAULT 0,
+        last_withdrawal_at DATETIME DEFAULT NULL
       )
     `);
 
-    // Create pdfs table
+    // Create pdfs table.
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS pdfs (
-        id INT PRIMARY KEY AUTO_INCREMENT,
+        id INT AUTO_INCREMENT PRIMARY KEY,
         title VARCHAR(255) NOT NULL,
         description TEXT,
         file_name VARCHAR(255) NOT NULL,
@@ -54,18 +56,28 @@ const initializeDatabase = async () => {
         pdf_data LONGBLOB,
         user_id INT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP NULL ON UPDATE CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         download_count INT DEFAULT 0,
         status ENUM('active', 'deleted') DEFAULT 'active',
         visibility ENUM('public', 'private', 'paid') DEFAULT 'public',
         tags JSON,
         is_paid BOOLEAN DEFAULT FALSE,
         price DECIMAL(10,2) DEFAULT 0.00,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-      )
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX (user_id),
+        INDEX (title),
+        INDEX (status),
+        INDEX (visibility)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
-    // Create purchases table with receipt columns (for PDF and image)
+    // Create dummy PDF record for upload fee transactions.
+    await promisePool.query(`
+      INSERT IGNORE INTO pdfs (id, title, description, file_name, file_size, user_id, visibility, status)
+      VALUES (?, 'Upload Fee', 'Special record for upload fee transactions', 'system.pdf', 0, 1, 'private', 'active')
+    `, [UPLOAD_FEE_IDENTIFIER]);
+
+    // Create purchases table.
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS purchases (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -83,17 +95,19 @@ const initializeDatabase = async () => {
         billing_address JSON,
         customer_email VARCHAR(255),
         metadata JSON,
+        transaction_type ENUM('pdf_purchase', 'upload_fee') DEFAULT 'pdf_purchase',
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY (pdf_id) REFERENCES pdfs(id) ON DELETE CASCADE,
         INDEX (user_id),
         INDEX (pdf_id),
         INDEX (transaction_id),
         INDEX (purchase_date),
-        INDEX (status)
-      )
+        INDEX (status),
+        INDEX (transaction_type)
+      ) ENGINE=InnoDB;
     `);
 
-    // Create comments table
+    // Create comments table.
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS comments (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -106,7 +120,7 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Create pdf_ratings table
+    // Create pdf_ratings table.
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS pdf_ratings (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -120,7 +134,7 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Create download_history table
+    // Create download_history table.
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS download_history (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -135,7 +149,7 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Create bookmarks table
+    // Create bookmarks table.
     await promisePool.query(`
       CREATE TABLE IF NOT EXISTS bookmarks (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -148,18 +162,55 @@ const initializeDatabase = async () => {
       )
     `);
 
-    // Insert default admin user if not exists
-    const hashedPassword = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'Okikiokiki123@', 10);
+    // Create withdrawals table for handling manual payout requests.
     await promisePool.query(`
-      INSERT IGNORE INTO users (
-        username,
-        password,
-        role,
-        email,
-        created_at,
-        status
-      ) VALUES (?, ?, 'admin', ?, NOW(), 'active')
-    `, [CURRENT_USER, hashedPassword, 'admin@example.com']);
+      CREATE TABLE IF NOT EXISTS withdrawals (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        bank_name VARCHAR(255) NOT NULL,
+        account_number VARCHAR(50) NOT NULL,
+        account_name VARCHAR(255) NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        status ENUM('pending', 'paid', 'declined') DEFAULT 'pending',
+        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        processed_at TIMESTAMP NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+
+    // Attempt to add the last_withdrawal_at column (if running an update on an existing users table).
+    try {
+      await promisePool.query(`
+        ALTER TABLE users ADD COLUMN last_withdrawal_at DATETIME DEFAULT NULL
+      `);
+      console.log("Column 'last_withdrawal_at' added successfully.");
+    } catch (alterErr) {
+      if (alterErr.code === 'ER_DUP_FIELDNAME') {
+        console.log("Column 'last_withdrawal_at' already exists.");
+      } else {
+        console.error("Error adding last_withdrawal_at column:", alterErr);
+      }
+    }
+    
+    // Insert default admin user if no user exists.
+    const [userCountResult] = await promisePool.query('SELECT COUNT(*) AS count FROM users');
+    if (userCountResult[0].count === 0) {
+      const hashedPassword = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'Okikiokiki123@', 10);
+      await promisePool.query(
+        `INSERT INTO users (
+          username,
+          password,
+          role,
+          email,
+          created_at,
+          status
+        ) VALUES (?, ?, 'admin', ?, NOW(), 'active')`,
+        [CURRENT_USER, hashedPassword, 'admin@example.com']
+      );
+      console.log('Default admin user created because no users existed.');
+    } else {
+      console.log('Users already exist; skipping default admin creation.');
+    }
 
     console.log('Database and tables initialized successfully');
     return promisePool;
@@ -169,7 +220,7 @@ const initializeDatabase = async () => {
   }
 };
 
-// Helper functions
+// Helper functions for various database operations.
 const helpers = {
   getCurrentTimestamp() {
     return CURRENT_TIMESTAMP;
@@ -179,7 +230,10 @@ const helpers = {
   },
   async updateDownloadCount(pdfId) {
     try {
-      const [result] = await promisePool.query(`UPDATE pdfs SET download_count = download_count + 1 WHERE id = ?`, [pdfId]);
+      const [result] = await promisePool.query(
+        `UPDATE pdfs SET download_count = download_count + 1 WHERE id = ?`,
+        [pdfId]
+      );
       return result;
     } catch (error) {
       console.error('Error in updateDownloadCount:', error);
@@ -230,132 +284,67 @@ const helpers = {
       connection.release();
     }
   },
-  async searchPdfs(filters = {}) {
-    try {
-      const { query, userId, visibility, sortBy = 'newest', limit = 10, offset = 0 } = filters;
-      let sql = `
-        SELECT 
-          p.*, u.username AS uploaded_by,
-          COUNT(DISTINCT dh.id) AS download_count,
-          COALESCE(AVG(pr.rating), 0) AS average_rating,
-          COUNT(DISTINCT c.id) AS comment_count
-        FROM pdfs p
-        LEFT JOIN users u ON p.user_id = u.id
-        LEFT JOIN download_history dh ON p.id = dh.pdf_id
-        LEFT JOIN pdf_ratings pr ON p.id = pr.pdf_id
-        LEFT JOIN comments c ON p.id = c.pdf_id
-        WHERE p.status = 'active'
-      `;
-      const params = [];
-      if (query) {
-        sql += ` AND (p.title LIKE ? OR p.description LIKE ?)`;
-        params.push(`%${query}%`, `%${query}%`);
-      }
-      if (userId) {
-        sql += ` AND p.user_id = ?`;
-        params.push(userId);
-      }
-      if (visibility) {
-        sql += ` AND p.visibility = ?`;
-        params.push(visibility);
-      }
-      sql += ` GROUP BY p.id`;
-      const sortMap = {
-        newest: 'p.created_at DESC',
-        oldest: 'p.created_at ASC',
-        downloads: 'download_count DESC',
-        rating: 'average_rating DESC',
-        title: 'p.title ASC'
-      };
-      sql += ` ORDER BY ${sortMap[sortBy] || 'p.created_at DESC'}`;
-      sql += ` LIMIT ? OFFSET ?`;
-      params.push(parseInt(limit), parseInt(offset));
-      const [rows] = await promisePool.query(sql, params);
-      return rows;
-    } catch (error) {
-      console.error('Error in searchPdfs:', error);
-      throw error;
-    }
-  },
-  async bookmarkPdf(userId, pdfId) {
-    try {
-      const [result] = await promisePool.query(`INSERT IGNORE INTO bookmarks (user_id, pdf_id) VALUES (?, ?)`, [userId, pdfId]);
-      return result;
-    } catch (error) {
-      console.error('Error in bookmarkPdf:', error);
-      throw error;
-    }
-  },
-  async removeBookmark(userId, pdfId) {
-    try {
-      const [result] = await promisePool.query(`DELETE FROM bookmarks WHERE user_id = ? AND pdf_id = ?`, [userId, pdfId]);
-      return result;
-    } catch (error) {
-      console.error('Error in removeBookmark:', error);
-      throw error;
-    }
-  },
-  async getBookmarks(userId) {
-    try {
-      const [rows] = await promisePool.query(
-        `SELECT b.*, p.title, p.description, p.file_name, p.created_at, p.updated_at
-         FROM bookmarks b
-         INNER JOIN pdfs p ON b.pdf_id = p.id
-         WHERE b.user_id = ?`,
-        [userId]
-      );
-      return rows;
-    } catch (error) {
-      console.error('Error in getBookmarks:', error);
-      throw error;
-    }
-  },
-  async getPurchaseByUserAndPdf(user_id, pdf_id) {
-    try {
-      const [rows] = await promisePool.query(`SELECT * FROM purchases WHERE user_id = ? AND pdf_id = ? LIMIT 1`, [user_id, pdf_id]);
-      return rows.length > 0 ? rows[0] : null;
-    } catch (error) {
-      console.error('Error in getPurchaseByUserAndPdf:', error);
-      throw error;
-    }
-  },
   async recordPurchase(purchaseData) {
     try {
       const { 
         user_id, 
         pdf_id, 
         amount, 
+        currency = 'USD', 
         payment_method, 
+        payment_provider = null, 
         transaction_id, 
-        status = 'completed',
-        currency = 'USD',
-        payment_provider,
-        billing_address,
-        customer_email,
-        metadata
+        status, 
+        billing_address = null, 
+        customer_email = null, 
+        metadata = null, 
+        transaction_type = pdf_id === 'upload_permission' ? 'upload_fee' : 'pdf_purchase'
       } = purchaseData;
+
+      let finalPdfId;
+      if (pdf_id === 'upload_permission' || transaction_type === 'upload_fee') {
+        finalPdfId = UPLOAD_FEE_IDENTIFIER;
+      } else if (transaction_type === 'pdf_purchase') {
+        if (!pdf_id || isNaN(parseInt(pdf_id)) || parseInt(pdf_id) <= 0) {
+          throw new Error('Invalid PDF id for a PDF purchase.');
+        }
+        finalPdfId = pdf_id;
+      } else {
+        finalPdfId = pdf_id;
+      }
+
       const [result] = await promisePool.query(
         `INSERT INTO purchases (
           user_id, pdf_id, amount, currency, payment_method, 
-          payment_provider, transaction_id, status, billing_address, customer_email, metadata
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          payment_provider, transaction_id, status, billing_address, 
+          customer_email, metadata, transaction_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           user_id, 
-          pdf_id, 
+          finalPdfId, 
           amount, 
           currency, 
           payment_method, 
           payment_provider, 
           transaction_id, 
-          status,
-          billing_address ? JSON.stringify(billing_address) : null,
-          customer_email,
-          metadata ? JSON.stringify(metadata) : null
+          status, 
+          billing_address, 
+          customer_email, 
+          metadata, 
+          transaction_type
         ]
       );
+
+      if ((transaction_type === 'upload_fee' || pdf_id === 'upload_permission') && status === 'completed') {
+        await promisePool.query(
+          `UPDATE users SET upload_fee_paid = 1 WHERE id = ?`,
+          [user_id]
+        );
+      }
+
       return { id: result.insertId, ...purchaseData, transaction_id };
     } catch (error) {
-      console.error('Error recording purchase:', error);
+      console.error('Error in recordPurchase:', error);
       throw error;
     }
   },
@@ -371,21 +360,27 @@ const helpers = {
       throw error;
     }
   },
-  async getUserPurchases(userId) {
+  async getPurchaseByTransactionId(transactionId) {
     try {
       const [rows] = await promisePool.query(
-        `SELECT 
-           p.*, pdf.title, pdf.description, pdf.price, pdf.cover_photo, u.username AS author_username
-         FROM purchases p
-         JOIN pdfs pdf ON p.pdf_id = pdf.id
-         JOIN users u ON pdf.user_id = u.id
-         WHERE p.user_id = ?
-         ORDER BY p.purchase_date DESC`,
-        [userId]
+        `SELECT * FROM purchases WHERE transaction_id = ?`,
+        [transactionId]
       );
-      return rows;
+      return rows[0];
     } catch (error) {
-      console.error('Error getting user purchases:', error);
+      console.error('Error in getPurchaseByTransactionId:', error);
+      throw error;
+    }
+  },
+  async getPurchaseByUserAndPdf(userId, pdfId) {
+    try {
+      const [rows] = await promisePool.query(
+        `SELECT * FROM purchases WHERE user_id = ? AND pdf_id = ? LIMIT 1`,
+        [userId, pdfId]
+      );
+      return rows.length > 0 ? rows[0] : null;
+    } catch (error) {
+      console.error('Error in getPurchaseByUserAndPdf:', error);
       throw error;
     }
   },
@@ -395,18 +390,22 @@ const helpers = {
         `SELECT 
            p.id AS purchase_id, p.amount, p.currency, p.payment_method, p.payment_provider,
            p.transaction_id, p.status AS payment_status, p.purchase_date, p.receipt_pdf, p.receipt_image,
-           p.customer_email, pdf.id AS pdf_id, pdf.title, pdf.description, pdf.price, pdf.cover_photo,
-           u.username AS author_username, u.id AS author_id
+           p.customer_email, pdf.id AS pdf_id, pdf.title, pdf.description, 
+           CASE WHEN p.transaction_type = 'upload_fee' THEN 'Upload Fee' ELSE pdf.price END AS price,
+           pdf.cover_photo,
+           CASE WHEN p.transaction_type = 'upload_fee' THEN 'System' ELSE u.username END AS author_username,
+           CASE WHEN p.transaction_type = 'upload_fee' THEN 1 ELSE u.id END AS author_id,
+           p.transaction_type
          FROM purchases p
          JOIN pdfs pdf ON p.pdf_id = pdf.id
-         JOIN users u ON pdf.user_id = u.id
+         LEFT JOIN users u ON pdf.user_id = u.id
          WHERE p.user_id = ?
          ORDER BY p.purchase_date DESC`,
         [userId]
       );
       return rows;
     } catch (error) {
-      console.error('Error getting user purchases with payment details:', error);
+      console.error("Error in getUserPurchasesWithPaymentDetails:", error);
       throw error;
     }
   },
@@ -416,9 +415,10 @@ const helpers = {
         `SELECT 
            COUNT(*) AS total_purchases,
            SUM(amount) AS total_spent,
-           COUNT(DISTINCT pdf_id) AS unique_pdfs_purchased,
+           COUNT(DISTINCT CASE WHEN transaction_type = 'pdf_purchase' THEN pdf_id ELSE NULL END) AS unique_pdfs_purchased,
            MIN(purchase_date) AS first_purchase_date,
-           MAX(purchase_date) AS last_purchase_date
+           MAX(purchase_date) AS last_purchase_date,
+           SUM(CASE WHEN transaction_type = 'upload_fee' THEN 1 ELSE 0 END) AS upload_fee_count
          FROM purchases
          WHERE user_id = ? AND status = 'completed'`,
         [userId]
@@ -435,7 +435,11 @@ const helpers = {
         `SELECT 
            COUNT(*) AS totalPurchases,
            SUM(amount) AS totalRevenue,
-           COUNT(DISTINCT user_id) AS uniqueCustomers
+           COUNT(DISTINCT user_id) AS uniqueCustomers,
+           SUM(CASE WHEN transaction_type = 'upload_fee' THEN 1 ELSE 0 END) AS uploadFeeCount,
+           SUM(CASE WHEN transaction_type = 'upload_fee' THEN amount ELSE 0 END) AS uploadFeeRevenue,
+           SUM(CASE WHEN transaction_type = 'pdf_purchase' THEN 1 ELSE 0 END) AS pdfPurchaseCount,
+           SUM(CASE WHEN transaction_type = 'pdf_purchase' THEN amount ELSE 0 END) AS pdfPurchaseRevenue
          FROM purchases
          WHERE status = 'completed'`
       );
@@ -451,7 +455,11 @@ const helpers = {
         `SELECT 
            DATE(purchase_date) AS date,
            COUNT(*) AS purchases,
-           SUM(amount) AS revenue
+           SUM(amount) AS revenue,
+           SUM(CASE WHEN transaction_type = 'upload_fee' THEN 1 ELSE 0 END) AS uploadFeeCount,
+           SUM(CASE WHEN transaction_type = 'upload_fee' THEN amount ELSE 0 END) AS uploadFeeRevenue,
+           SUM(CASE WHEN transaction_type = 'pdf_purchase' THEN 1 ELSE 0 END) AS pdfPurchaseCount,
+           SUM(CASE WHEN transaction_type = 'pdf_purchase' THEN amount ELSE 0 END) AS pdfPurchaseRevenue
          FROM purchases
          WHERE purchase_date >= DATE_SUB(NOW(), INTERVAL ? DAY)
          GROUP BY DATE(purchase_date)
@@ -471,7 +479,11 @@ const helpers = {
            COUNT(*) AS totalPurchases,
            SUM(amount) AS totalSpent,
            MIN(purchase_date) AS firstPurchase,
-           MAX(purchase_date) AS lastPurchase
+           MAX(purchase_date) AS lastPurchase,
+           SUM(CASE WHEN transaction_type = 'upload_fee' THEN 1 ELSE 0 END) AS uploadFeeCount,
+           SUM(CASE WHEN transaction_type = 'upload_fee' THEN amount ELSE 0 END) AS uploadFeeSpent,
+           SUM(CASE WHEN transaction_type = 'pdf_purchase' THEN 1 ELSE 0 END) AS pdfPurchaseCount,
+           SUM(CASE WHEN transaction_type = 'pdf_purchase' THEN amount ELSE 0 END) AS pdfPurchaseSpent
          FROM purchases
          WHERE user_id = ?`,
         [userId]
@@ -485,7 +497,8 @@ const helpers = {
   async getPurchaseReceipt(userId, pdfId) {
     try {
       const [rows] = await promisePool.query(
-        `SELECT p.*, pdf.title AS pdfTitle, pdf.price AS pdfPrice
+        `SELECT p.*, pdf.title AS pdfTitle, 
+         CASE WHEN p.transaction_type = 'upload_fee' THEN 'Upload Fee' ELSE pdf.price END AS pdfPrice
          FROM purchases p
          JOIN pdfs pdf ON p.pdf_id = pdf.id
          WHERE p.user_id = ? AND p.pdf_id = ?`,
@@ -497,14 +510,31 @@ const helpers = {
       throw error;
     }
   },
-  // NEW: Retrieve purchase by transaction ID.
-  async getPurchaseByTransactionId(transactionId) {
+  async recordUploadFee(userId, amount, paymentMethod, transactionId, paymentProvider = null) {
     try {
-      const query = 'SELECT * FROM purchases WHERE transaction_id = ?';
-      const [rows] = await promisePool.query(query, [transactionId]);
-      return (rows && rows.length > 0) ? rows[0] : null;
+      return await this.recordPurchase({
+        user_id: userId,
+        pdf_id: UPLOAD_FEE_IDENTIFIER,
+        amount,
+        payment_method: paymentMethod,
+        transaction_id: transactionId,
+        payment_provider: paymentProvider,
+        transaction_type: 'upload_fee'
+      });
     } catch (error) {
-      console.error('Error in getPurchaseByTransactionId:', error);
+      console.error('Error recording upload fee:', error);
+      throw error;
+    }
+  },
+  async hasUserPaidUploadFee(userId) {
+    try {
+      const [rows] = await promisePool.query(
+        `SELECT upload_fee_paid FROM users WHERE id = ?`,
+        [userId]
+      );
+      return rows.length > 0 && rows[0].upload_fee_paid === 1;
+    } catch (error) {
+      console.error('Error checking upload fee payment status:', error);
       throw error;
     }
   }
@@ -516,5 +546,6 @@ module.exports = {
   db: promisePool,
   helpers,
   CURRENT_TIMESTAMP,
-  CURRENT_USER
+  CURRENT_USER,
+  UPLOAD_FEE_IDENTIFIER
 };

@@ -1,9 +1,11 @@
 const { db } = require('../config/db');
 
 const profileController = {
-  // Retrieves the current user's profile details, including download history.
+  /**
+   * Retrieves the current user's profile details, including download history.
+   */
   async getProfile(req, res) {
-    const userId = req.user.id; // Provided by the authentication middleware
+    const userId = req.user.id; // Provided by the authentication middleware.
     try {
       // Retrieve the user record including the profile_pic BLOB.
       const [users] = await db.query(
@@ -23,11 +25,21 @@ const profileController = {
       // Remove the raw binary field from the response.
       delete user.profile_pic;
 
-      // Query the download_history for this user with the pdf_title.
+      // Query the download_history for this user, including the PDF payment status.
       const [downloads] = await db.query(
-        `SELECT id, pdf_id, pdf_title, downloaded_at, ip_address, user_agent 
-         FROM download_history 
-         WHERE user_id = ?`,
+        `
+        SELECT 
+          dh.id, 
+          dh.pdf_id, 
+          dh.pdf_title, 
+          dh.downloaded_at, 
+          dh.ip_address, 
+          dh.user_agent,
+          CASE WHEN p.is_paid = 1 THEN 'paid' ELSE 'free' END AS payment_status
+        FROM download_history dh
+        LEFT JOIN pdfs p ON dh.pdf_id = p.id
+        WHERE dh.user_id = ?
+        `,
         [userId]
       );
 
@@ -41,7 +53,9 @@ const profileController = {
     }
   },
 
-  // Updates the current user's profile.
+  /**
+   * Updates the current user's profile.
+   */
   async updateProfile(req, res) {
     const userId = req.user.id;
     const { username, email } = req.body;
@@ -73,25 +87,32 @@ const profileController = {
   },
 
   /**
-   * Retrieves the user's download history and the upload (PDF) history with performance metrics.
-   * The upload history includes for each PDF:
-   *  - download_count
-   *  - average_rating (based on ratings in pdf_ratings)
-   *  - the number of ratings (rating_count)
-   * In addition, aggregated overall metrics are computed.
+   * Retrieves the user's download and upload history along with performance metrics.
+   * The upload history now includes metrics such as download_count, average_rating, rating_count,
+   * and the payment_status indicating if the PDF is paid or free.
    */
   async getHistory(req, res) {
     const userId = req.user.id;
     try {
-      // Query download history including the pdf_title.
+      // Query download history including the PDF payment status.
       const [downloads] = await db.query(
-        `SELECT id, pdf_id, pdf_title, downloaded_at, ip_address, user_agent 
-         FROM download_history 
-         WHERE user_id = ?`,
+        `
+        SELECT 
+          dh.id, 
+          dh.pdf_id, 
+          dh.pdf_title, 
+          dh.downloaded_at, 
+          dh.ip_address, 
+          dh.user_agent,
+          CASE WHEN p.is_paid = 1 THEN 'paid' ELSE 'free' END AS payment_status
+        FROM download_history dh
+        LEFT JOIN pdfs p ON dh.pdf_id = p.id
+        WHERE dh.user_id = ?
+        `,
         [userId]
       );
 
-      // Query upload history along with metrics from the pdf_ratings table.
+      // Query upload history along with metrics from the pdf_ratings table and payment status.
       const [uploads] = await db.query(
         `
         SELECT 
@@ -99,6 +120,8 @@ const profileController = {
           p.title,
           p.download_count,
           p.created_at,
+          p.price,
+          CASE WHEN p.is_paid = 1 THEN 'paid' ELSE 'free' END AS payment_status,
           COALESCE(AVG(pr.rating), 0) AS average_rating,
           COUNT(pr.id) AS rating_count
         FROM pdfs p
@@ -133,6 +156,30 @@ const profileController = {
     } catch (error) {
       console.error('Error fetching history:', error);
       res.status(500).json({ message: 'Error fetching history.' });
+    }
+  },
+
+  /**
+   * Retrieves the upload fee permission status for the current user.
+   * This method checks whether the user has paid their upload fee.
+   * Assumes that your "users" table has a column named "upload_fee_paid".
+   */
+  async getUploadPermission(req, res) {
+    const userId = req.user.id;
+    try {
+      const [users] = await db.query(
+        'SELECT upload_fee_paid FROM users WHERE id = ?',
+        [userId]
+      );
+      if (!users || users.length === 0) {
+        return res.status(404).json({ message: 'User not found.' });
+      }
+      // Assuming a value of 1 means the fee has been paid.
+      const hasPaid = users[0].upload_fee_paid === 1;
+      res.status(200).json({ hasPaid });
+    } catch (error) {
+      console.error('Error checking upload fee status:', error);
+      res.status(500).json({ message: 'Error checking upload fee status.' });
     }
   },
 };
