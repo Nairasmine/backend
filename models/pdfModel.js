@@ -1,7 +1,8 @@
+// models/pdfModel.js
 const { db, helpers } = require('../config/db');
 
 // -------------------- Create a PDF --------------------
-// Allowing paid/free PDFs with price option
+// Allowed for both paid and free PDFs. Tags are stored as JSON.
 async function createPdf({
   title,
   description,
@@ -13,13 +14,12 @@ async function createPdf({
   pdf_data,
   visibility,
   tags,
-  isPaid = false, // Default to free
-  price = 0.00    // Default to free
+  isPaid = false,
+  price = 0.00
 }) {
   if (isPaid && price <= 0) {
     throw new Error('Price must be greater than 0 for paid PDFs.');
   }
-
   const query = `
     INSERT INTO pdfs 
       (title, description, user_id, file_name, file_size, mime_type, cover_photo, pdf_data, 
@@ -67,7 +67,6 @@ async function updatePdf(id, { title, description, isPaid, price }) {
   if (isPaid && price <= 0) {
     throw new Error('Price must be greater than 0 for paid PDFs.');
   }
-
   const query = `
     UPDATE pdfs 
     SET title = ?, description = ?, is_paid = ?, price = ? 
@@ -132,12 +131,26 @@ async function addComment(pdfId, userId, comment) {
 
 // -------------------- Search PDFs --------------------
 async function searchPdfs(filters = {}) {
-  const { query, userId, visibility, isPaid, sortBy = 'newest', limit = 10, offset = 0 } = filters;
+  const {
+    query: q,
+    userId,
+    visibility,
+    isPaid,
+    sortBy = 'newest',
+    limit = 10,
+    offset = 0
+  } = filters;
+
+  // Increase the sort buffer size for this session to help avoid memory issues.
+  await db.query("SET SESSION sort_buffer_size = 67108864"); // 64 MB
 
   let sql = `
-    SELECT p.*, u.username AS user, u.profile_pic AS profilePic,
-           COALESCE(AVG(pr.rating), 0) AS average_rating,
-           COUNT(DISTINCT h.id) AS download_count
+    SELECT 
+      p.*, 
+      u.username AS user, 
+      u.profile_pic AS profilePic,
+      COALESCE(AVG(pr.rating), 0) AS average_rating,
+      COUNT(DISTINCT h.id) AS download_count
     FROM pdfs p 
     LEFT JOIN users u ON p.user_id = u.id 
     LEFT JOIN pdf_ratings pr ON p.id = pr.pdf_id
@@ -146,28 +159,25 @@ async function searchPdfs(filters = {}) {
   `;
   const params = [];
 
-  if (query) {
+  if (q) {
     sql += ` AND (p.title LIKE ? OR p.description LIKE ?)`;
-    params.push(`%${query}%`, `%${query}%`);
+    params.push(`%${q}%`, `%${q}%`);
   }
-
   if (userId) {
     sql += ` AND p.user_id = ?`;
     params.push(userId);
   }
-
   if (visibility) {
     sql += ` AND p.visibility = ?`;
     params.push(visibility);
   }
-
   if (isPaid !== undefined) {
     sql += ` AND p.is_paid = ?`;
     params.push(isPaid);
   }
 
-  sql += ` GROUP BY p.id, p.title, p.description, p.user_id, p.file_name, p.file_size, p.mime_type, 
-            p.cover_photo, p.is_paid, p.price, p.created_at, p.tags, u.username, u.profile_pic`;
+  // Optimized GROUP BY using only the primary key.
+  sql += ` GROUP BY p.id`;
 
   const sortMap = {
     newest: 'p.created_at DESC',
@@ -176,7 +186,6 @@ async function searchPdfs(filters = {}) {
     rating: 'average_rating DESC',
     title: 'p.title ASC'
   };
-
   sql += ` ORDER BY ${sortMap[sortBy] || 'p.created_at DESC'}`;
   sql += ` LIMIT ? OFFSET ?`;
   params.push(parseInt(limit), parseInt(offset));
@@ -204,7 +213,7 @@ async function ratePdf(id, userId, rating) {
     ON DUPLICATE KEY UPDATE rating = ?, created_at = NOW()
   `;
   await db.query(query, [id, userId, rating, rating]);
-
+  // Update uploader overall rating.
   const [uploaderResults] = await db.query(`SELECT user_id FROM pdfs WHERE id = ?`, [id]);
   if (uploaderResults.length > 0) {
     const uploaderId = uploaderResults[0].user_id;
@@ -213,7 +222,7 @@ async function ratePdf(id, userId, rating) {
        FROM pdf_ratings pr
        JOIN pdfs p ON p.id = pr.pdf_id
        WHERE p.user_id = ?`,
-       [uploaderId]
+      [uploaderId]
     );
     const overallRating = ratingRows[0].overallRating;
     await db.query(`UPDATE users SET overall_rating = ? WHERE id = ?`, [overallRating, uploaderId]);
@@ -226,20 +235,16 @@ async function recordHistory(pdfId, userId, req) {
 }
 
 // -------------------- Bookmark Functions --------------------
-
-// Add bookmark
 async function bookmarkPdf(userId, pdfId) {
   const query = `INSERT IGNORE INTO bookmarks (user_id, pdf_id) VALUES (?, ?)`;
   return await db.query(query, [userId, pdfId]);
 }
 
-// Remove bookmark
 async function removeBookmark(userId, pdfId) {
   const query = `DELETE FROM bookmarks WHERE user_id = ? AND pdf_id = ?`;
   return await db.query(query, [userId, pdfId]);
 }
 
-// Get bookmarks
 async function getBookmarks(userId) {
   const query = `
     SELECT b.*, p.title, p.description, p.file_name, p.created_at, p.updated_at, p.is_paid, p.price
@@ -252,8 +257,6 @@ async function getBookmarks(userId) {
 }
 
 // -------------------- Payment Functions --------------------
-
-// Check if user has purchased a PDF
 async function checkPurchase(userId, pdfId) {
   const query = `
     SELECT COUNT(*) as count 
@@ -264,7 +267,6 @@ async function checkPurchase(userId, pdfId) {
   return result[0].count > 0;
 }
 
-// Record a purchase
 async function recordPurchase(userId, pdfId, reference, amount) {
   const query = `
     INSERT INTO purchases (user_id, pdf_id, reference, amount, purchase_date)
@@ -273,7 +275,6 @@ async function recordPurchase(userId, pdfId, reference, amount) {
   return await db.query(query, [userId, pdfId, reference, amount]);
 }
 
-// Get purchased PDFs
 async function getPurchasedPdfs(userId) {
   const query = `
     SELECT p.id, p.title, p.description, p.file_name, p.created_at, p.is_paid, p.price,

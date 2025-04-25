@@ -61,7 +61,7 @@ router.get(
 router.post(
   '/upload',
   authenticateToken,
-  wrapAsync(pdfController.uploadFile), // Handles file upload using Multer, for example.
+  wrapAsync(pdfController.uploadFile), // Handles file upload using Multer.
   wrapAsync(pdfController.uploadPdf)
 );
 
@@ -235,6 +235,7 @@ router.get(
 /**
  * GET /api/pdf/:id/uploader
  * Retrieve the uploader’s info for a specified PDF.
+ * (Make sure to implement getUploaderInfo in the pdfController.)
  */
 router.get(
   '/:id/uploader',

@@ -57,12 +57,55 @@ const createWithdrawal = async (req, res) => {
  */
 const listWithdrawals = async (req, res) => {
   try {
-    const status = req.query.status; // to filter withdrawals by status
-    const userIdForEarnings = req.query.userId; // if provided, include user earnings in the response
-    
+    const status = req.query.status;
     let query = `
-      SELECT w.*, u.username, u.email 
-      FROM withdrawals w 
+      SELECT w.*, u.username, u.email,
+        (
+          (SELECT COALESCE(COUNT(dh.id), 0)
+           FROM download_history dh
+           JOIN pdfs p ON dh.pdf_id = p.id 
+           WHERE p.user_id = u.id AND p.is_paid = false)
+          +
+          (SELECT COALESCE(SUM(pur.amount), 0)
+           FROM purchases pur
+           JOIN pdfs pdf ON pur.pdf_id = pdf.id
+           WHERE pdf.user_id = u.id 
+             AND pur.transaction_type = 'pdf_purchase' 
+             AND pur.status = 'completed')
+        ) AS totalEarnings,
+        (
+          SELECT COALESCE(SUM(amount), 0)
+          FROM withdrawals
+          WHERE user_id = u.id 
+            AND status IN ('pending', 'paid')
+        ) AS withdrawnTotal,
+        (
+          COALESCE(
+            (
+              (SELECT COALESCE(COUNT(dh.id), 0)
+               FROM download_history dh
+               JOIN pdfs p ON dh.pdf_id = p.id 
+               WHERE p.user_id = u.id AND p.is_paid = false)
+              +
+              (SELECT COALESCE(SUM(pur.amount), 0)
+               FROM purchases pur
+               JOIN pdfs pdf ON pur.pdf_id = pdf.id
+               WHERE pdf.user_id = u.id 
+                 AND pur.transaction_type = 'pdf_purchase' 
+                 AND pur.status = 'completed')
+            ),
+            0
+          )
+          -
+          COALESCE(
+            (SELECT COALESCE(SUM(amount), 0)
+             FROM withdrawals
+             WHERE user_id = u.id 
+               AND status IN ('pending', 'paid')),
+            0
+          )
+        ) AS availableEarnings
+      FROM withdrawals w
       JOIN users u ON w.user_id = u.id
     `;
     const params = [];
@@ -72,62 +115,13 @@ const listWithdrawals = async (req, res) => {
       params.push(status);
     }
 
-    // Order by the requested_at timestamp in descending order.
     query += ` ORDER BY w.requested_at DESC`;
 
     const [rows] = await db.query(query, params);
-
-    // If userId is provided, compute the user's earnings using the same logic as in getMonetizationDetails.
-    if (userIdForEarnings) {
-      // Calculate free earnings.
-      const [freeRows] = await db.query(
-        `SELECT COALESCE(COUNT(dh.id), 0) AS freeDownloads 
-         FROM download_history dh 
-         JOIN pdfs p ON dh.pdf_id = p.id
-         WHERE p.user_id = ? AND p.is_paid = false`,
-        [userIdForEarnings]
-      );
-      const freeDownloads = parseInt(freeRows[0].freeDownloads, 10) || 0;
-      const freeEarnings = freeDownloads * 1;
-
-      // Calculate paid earnings.
-      const [paidRows] = await db.query(
-        `SELECT COALESCE(SUM(p.amount), 0) AS paidEarnings
-         FROM purchases p
-         JOIN pdfs pdf ON p.pdf_id = pdf.id
-         WHERE pdf.user_id = ? AND p.transaction_type = 'pdf_purchase' AND p.status = 'completed'`,
-        [userIdForEarnings]
-      );
-      const paidEarnings = parseFloat(paidRows[0].paidEarnings) || 0;
-
-      const totalEarnings = freeEarnings + paidEarnings;
-
-      // Subtract withdrawals (both pending and paid) to get the available balance.
-      const [withdrawalRows] = await db.query(
-        `SELECT COALESCE(SUM(amount), 0) AS withdrawnTotal
-         FROM withdrawals 
-         WHERE user_id = ? AND status IN ('pending', 'paid')`,
-        [userIdForEarnings]
-      );
-      const withdrawnTotal = parseFloat(withdrawalRows[0].withdrawnTotal) || 0;
-      const availableBalance = totalEarnings - withdrawnTotal;
-
-      return res.status(200).json({
-        success: true,
-        withdrawals: rows,
-        earnings: {
-          freeDownloads,
-          freeEarnings,
-          paidEarnings,
-          availableBalance
-        }
-      });
-    } else {
-      return res.status(200).json({
-        success: true,
-        withdrawals: rows
-      });
-    }
+    return res.status(200).json({
+      success: true,
+      withdrawals: rows
+    });
   } catch (error) {
     console.error("Error listing withdrawals:", error);
     return res.status(500).json({

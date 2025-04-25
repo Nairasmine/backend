@@ -1,54 +1,115 @@
 // controllers/pdfController.js
-require('dotenv').config(); // Load environment variables
+require('dotenv').config();
 const pdfModel = require('../models/pdfModel');
+const { helpers } = require('../config/db');  // Import helpers to use recordDownload
 const multer = require('multer');
 const axios = require('axios');
+const zlib = require('zlib');
+const crypto = require('crypto');
 
-// Define API_BASE_URL for any needed internal references
-const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:5000/api';
+// ----------------------------- Encryption Config -----------------------------
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY; 
+const ALGORITHM = 'aes-256-cbc';
+const IV_LENGTH = 16;
 
-// --- Multer configuration for file upload ---
+function encryptBuffer(buffer) {
+  if (!ENCRYPTION_KEY) return buffer;
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY, 'utf8'), iv);
+  const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
+  return Buffer.concat([iv, encrypted]);
+}
+
+function decryptBuffer(buffer) {
+  if (!ENCRYPTION_KEY) return buffer;
+  const iv = buffer.slice(0, IV_LENGTH);
+  const encryptedText = buffer.slice(IV_LENGTH);
+  const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY, 'utf8'), iv);
+  return Buffer.concat([decipher.update(encryptedText), decipher.final()]);
+}
+
+// ----------------------------- Multer Configuration -----------------------------
 const storage = multer.memoryStorage();
 const fileFilter = (req, file, cb) => {
-  if (file.fieldname === 'pdf' || file.fieldname === 'cover_photo') {
-    cb(null, true);
+  if (file.fieldname === 'pdf') {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'Only PDFs are allowed in pdf field'));
+    }
+  } else if (file.fieldname === 'cover_photo') {
+    if (file.mimetype === 'image/jpeg' || file.mimetype === 'image/png') {
+      cb(null, true);
+    } else {
+      cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'Only JPEG/PNG images are allowed in cover_photo field'));
+    }
   } else {
     cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', file.fieldname));
   }
 };
 const upload = multer({ storage, fileFilter });
 
+// ----------------------------- Helper: Compute Additional Charge -----------------------------
+function computeAdditionalCharge(price) {
+  let charge = 0;
+  if (price >= 100 && price <= 500) {
+    charge = 50;
+  } else if (price > 500 && price <= 2000) {
+    charge = 100;
+  } else if (price > 2000 && price <= 5000) {
+    charge = 200;
+  } else if (price > 5000 && price <= 15000) {
+    charge = 300;
+  } else if (price > 15000 && price <= 30000) {
+    charge = 500;
+  } else if (price > 30000) {
+    charge = 500 + Math.ceil((price - 30000) / 1000) * 50;
+  }
+  return charge;
+}
+
+// ----------------------------- Controller Methods -----------------------------
 const pdfController = {
-  // Middleware: Process multiple file fields for file uploads
+  // Middleware: Process multiple file uploads.
   uploadFile: upload.fields([
     { name: 'pdf', maxCount: 1 },
     { name: 'cover_photo', maxCount: 1 }
   ]),
 
-  // Upload a new PDF
+  // Upload a new PDF: compress and encrypt file data.
   async uploadPdf(req, res) {
-    const { title, description, visibility, tags, isPaid, price } = req.body;
+    const title = (req.body.title || '').trim();
+    const description = (req.body.description || '').trim();
+    const visibility = (req.body.visibility || 'public').trim();
+    const tags = (req.body.tags || '').trim();
+    const { isPaid, price } = req.body;
     const userId = req.user && req.user.id;
-    
     if (!req.files || !req.files.pdf || req.files.pdf.length === 0) {
       return res.status(400).json({ message: 'No PDF file uploaded.' });
     }
     if (!userId) {
       return res.status(401).json({ message: 'Unauthorized: user not found.' });
     }
-    
-    // Validate price for paid PDFs
     const paidStatus = isPaid === 'true';
     const priceValue = parseFloat(price) || 0.00;
     if (paidStatus && priceValue <= 0) {
       return res.status(400).json({ message: 'Price must be greater than 0 for paid PDFs.' });
     }
-
     const pdfFile = req.files.pdf[0];
-    const coverPhoto = (req.files.cover_photo && req.files.cover_photo.length > 0)
-      ? req.files.cover_photo[0].buffer
-      : null;
-
+    const compressedPdfData = zlib.gzipSync(pdfFile.buffer);
+    const encryptedPdfData = encryptBuffer(compressedPdfData);
+    let encryptedCoverPhoto = null;
+    if (req.files.cover_photo && req.files.cover_photo.length > 0) {
+      const coverPhotoBuffer = req.files.cover_photo[0].buffer;
+      const compressedCoverPhoto = zlib.gzipSync(coverPhotoBuffer);
+      encryptedCoverPhoto = encryptBuffer(compressedCoverPhoto);
+    }
+    let extraCharge = 0;
+    let finalPrice = priceValue;
+    if (paidStatus) {
+      extraCharge = computeAdditionalCharge(priceValue);
+      finalPrice = priceValue + extraCharge;
+    }
     try {
       await pdfModel.createPdf({
         title,
@@ -57,29 +118,38 @@ const pdfController = {
         file_name: pdfFile.originalname,
         file_size: pdfFile.size,
         mime_type: pdfFile.mimetype,
-        cover_photo: coverPhoto,
-        pdf_data: pdfFile.buffer,
+        cover_photo: encryptedCoverPhoto,
+        pdf_data: encryptedPdfData,
         visibility,
         tags,
         isPaid: paidStatus,
-        price: priceValue
+        price: finalPrice
       });
-      res.status(201).json({ message: 'PDF uploaded successfully.' });
+      res.status(201).json({
+        message: 'PDF uploaded successfully.',
+        originalPrice: priceValue,
+        extraCharge,
+        finalPrice
+      });
     } catch (error) {
       console.error('Error uploading PDF:', error);
       res.status(500).json({ message: 'Error uploading PDF.' });
     }
   },
 
-  // Get all PDFs with payment info
+  // Retrieve metadata for all active PDFs.
   async getAllPdfs(req, res) {
     try {
       const pdfs = await pdfModel.getAllPdfs();
-      
-      // Process each PDF to include payment information correctly
       const pdfsWithProfile = pdfs.map(pdf => {
         if (pdf.profilePic) {
-          pdf.profilePicBase64 = pdf.profilePic.toString('base64');
+          try {
+            const decryptedPic = decryptBuffer(pdf.profilePic);
+            const decompressedPic = zlib.gunzipSync(decryptedPic);
+            pdf.profilePicBase64 = decompressedPic.toString('base64');
+          } catch (err) {
+            pdf.profilePicBase64 = pdf.profilePic.toString('base64');
+          }
         } else {
           pdf.profilePicBase64 = null;
         }
@@ -88,7 +158,6 @@ const pdfController = {
         pdf.price = parseFloat(pdf.price) || 0.00;
         return pdf;
       });
-      
       res.status(200).json(pdfsWithProfile);
     } catch (error) {
       console.error('Error fetching PDFs:', error);
@@ -96,21 +165,30 @@ const pdfController = {
     }
   },
 
-  // Update PDF metadata
+  // Update a PDF.
   async updatePdf(req, res) {
     const { id } = req.params;
-    const { title, description, isPaid, price } = req.body;
+    const title = (req.body.title || '').trim();
+    const description = (req.body.description || '').trim();
+    const { isPaid, price } = req.body;
     const paidStatus = isPaid === 'true';
     const priceValue = parseFloat(price) || 0.00;
     if (paidStatus && priceValue <= 0) {
       return res.status(400).json({ message: 'Price must be greater than 0 for paid PDFs.' });
     }
+    let extraCharge = 0;
+    let finalPrice = priceValue;
+    if (paidStatus) {
+      extraCharge = computeAdditionalCharge(priceValue);
+      finalPrice = priceValue + extraCharge;
+    }
     try {
-      await pdfModel.updatePdf(id, { 
-        title, 
-        description, 
-        isPaid: paidStatus, 
-        price: priceValue 
+      await pdfModel.updatePdf(id, {
+        title,
+        description,
+        isPaid: paidStatus,
+        price: finalPrice,
+        extraCharge
       });
       res.status(200).json({ message: 'PDF updated successfully.' });
     } catch (error) {
@@ -119,7 +197,7 @@ const pdfController = {
     }
   },
 
-  // Delete a PDF
+  // Delete a PDF.
   async deletePdf(req, res) {
     const { id } = req.params;
     try {
@@ -131,7 +209,7 @@ const pdfController = {
     }
   },
 
-  // Get PDF details with payment info
+  // Retrieve full details for a specific PDF.
   async getPdfDetails(req, res) {
     const { id } = req.params;
     try {
@@ -139,19 +217,22 @@ const pdfController = {
       if (!pdfs || pdfs.length === 0) {
         return res.status(404).json({ message: 'PDF not found.' });
       }
-      
       const pdf = pdfs[0];
       if (pdf.profilePic) {
-        pdf.profilePicBase64 = pdf.profilePic.toString('base64');
+        try {
+          const decryptedPic = decryptBuffer(pdf.profilePic);
+          const decompressedPic = zlib.gunzipSync(decryptedPic);
+          pdf.profilePicBase64 = decompressedPic.toString('base64');
+        } catch (_) {
+          pdf.profilePicBase64 = pdf.profilePic.toString('base64');
+        }
       } else {
         pdf.profilePicBase64 = null;
       }
       delete pdf.profilePic;
-      
       pdf.isPaid = pdf.is_paid ? "true" : "false";
       pdf.price = parseFloat(pdf.price) || 0.00;
       pdf.rating_percentage = (pdf.average_rating / 5) * 100;
-      
       res.status(200).json(pdf);
     } catch (error) {
       console.error('Error retrieving PDF details:', error);
@@ -159,7 +240,7 @@ const pdfController = {
     }
   },
 
-  // Get cover photo
+  // Serve cover photo.
   async getCoverPhoto(req, res) {
     const { id } = req.params;
     try {
@@ -168,19 +249,20 @@ const pdfController = {
         return res.status(404).json({ message: 'Cover photo not found.' });
       }
       const photoData = results[0].cover_photo;
-      const coverBuffer = Buffer.isBuffer(photoData) ? photoData : Buffer.from(photoData);
+      const decryptedCover = decryptBuffer(photoData);
+      const decompressedCover = zlib.gunzipSync(decryptedCover);
       res.writeHead(200, {
         'Content-Type': 'image/jpeg',
-        'Content-Length': coverBuffer.length,
+        'Content-Length': decompressedCover.length,
       });
-      res.end(coverBuffer);
+      res.end(decompressedCover);
     } catch (error) {
       console.error('Error retrieving cover photo:', error);
       res.status(500).json({ message: 'Error retrieving cover photo.' });
     }
   },
 
-  // Get comments
+  // Retrieve comments for a PDF.
   async getComments(req, res) {
     const { id } = req.params;
     try {
@@ -192,7 +274,7 @@ const pdfController = {
     }
   },
 
-  // Add comment
+  // Add a comment to a PDF.
   async commentOnPdf(req, res) {
     const { id } = req.params;
     const { comment } = req.body;
@@ -209,22 +291,28 @@ const pdfController = {
     }
   },
 
-  // Search PDFs with payment info
+  // -------------------- Search PDFs for Frontend --------------------
   async searchPdfs(req, res) {
-    const { q, isPaid, visibility, sortBy, limit, offset } = req.query;
     try {
-      const rows = await pdfModel.searchPdfs({
-        query: q,
-        isPaid: isPaid === 'true',
-        visibility,
-        sortBy,
-        limit: parseInt(limit) || 10,
-        offset: parseInt(offset) || 0
-      });
-      
-      const rowsWithProfile = rows.map(row => {
+      const filters = {
+        query: req.query.query,           // Search term for title/description.
+        userId: req.query.userId,         // Optional: filter by uploader.
+        visibility: req.query.visibility, // e.g., 'public'
+        isPaid: req.query.isPaid,         // Boolean string.
+        sortBy: req.query.sortBy,         // newest, oldest, downloads, rating, title.
+        limit: req.query.limit || 10,
+        offset: req.query.offset || 0
+      };
+      const results = await pdfModel.searchPdfs(filters);
+      const processed = results.map(row => {
         if (row.profilePic) {
-          row.profilePicBase64 = row.profilePic.toString('base64');
+          try {
+            const decryptedPic = decryptBuffer(row.profilePic);
+            const decompressedPic = zlib.gunzipSync(decryptedPic);
+            row.profilePicBase64 = decompressedPic.toString('base64');
+          } catch (e) {
+            row.profilePicBase64 = row.profilePic.toString('base64');
+          }
         } else {
           row.profilePicBase64 = null;
         }
@@ -233,59 +321,51 @@ const pdfController = {
         row.price = parseFloat(row.price) || 0.00;
         return row;
       });
-      
-      res.status(200).json(rowsWithProfile);
+      res.status(200).json(processed);
     } catch (error) {
       console.error('Error searching PDFs:', error);
       res.status(500).json({ message: 'Error searching PDFs.' });
     }
   },
 
-  // Download PDF with payment verification (one-time purchase model)
-async downloadPdf(req, res) {
-  const { id } = req.params;
-  const userId = req.user && req.user.id;
-
-  if (!userId) {
-    return res.status(401).json({ message: 'Unauthorized: user not found.' });
-  }
-
-  try {
-    const results = await pdfModel.downloadPdf(id);
-    if (!results || results.length === 0) {
-      return res.status(404).json({ message: 'PDF not found.' });
+  // Download PDF with payment verification.
+  async downloadPdf(req, res) {
+    const { id } = req.params;
+    const userId = req.user && req.user.id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized: user not found.' });
     }
-
-    const pdf = results[0];
-    
-    // Determine whether the PDF is marked as paid. This handles booleans, numbers or string representations.
-    const isPaid = 
-      pdf.is_paid === true ||
-      pdf.is_paid === 1 ||
-      pdf.is_paid === 'true';
-
-    // For paid PDFs, verify that the user has purchased the PDF (one-time purchase record)
-    if (isPaid) {
-      const hasPurchased = await pdfModel.checkPurchase(userId, id);
-      if (!hasPurchased) {
-        return res.status(403).json({
-          message: 'This is a paid PDF. Please purchase to download.',
-          price: Number(pdf.price) || 0.00
-        });
+    try {
+      const results = await pdfModel.downloadPdf(id);
+      if (!results || results.length === 0) {
+        return res.status(404).json({ message: 'PDF not found.' });
       }
+      const pdf = results[0];
+      const isPdfPaid =
+        pdf.is_paid === true ||
+        pdf.is_paid === 1 ||
+        pdf.is_paid === 'true';
+      if (isPdfPaid) {
+        const hasPurchased = await pdfModel.checkPurchase(userId, id);
+        if (!hasPurchased) {
+          return res.status(403).json({
+            message: 'This is a paid PDF. Please purchase to download.',
+            price: Number(pdf.price) || 0.00
+          });
+        }
+      }
+      const decryptedPdf = decryptBuffer(pdf.pdf_data);
+      const decompressedPdfData = zlib.gunzipSync(decryptedPdf);
+      res.setHeader('Content-Disposition', `attachment; filename="${pdf.file_name}"`);
+      res.setHeader('Content-Type', pdf.mime_type);
+      return res.send(decompressedPdfData);
+    } catch (error) {
+      console.error('Error downloading PDF:', error);
+      res.status(500).json({ message: 'Error downloading PDF.' });
     }
-    
-    // Set headers to initiate a file download
-    res.setHeader('Content-Disposition', `attachment; filename="${pdf.file_name}"`);
-    res.setHeader('Content-Type', pdf.mime_type);
-    return res.send(pdf.pdf_data);
-  } catch (error) {
-    console.error('Error downloading PDF:', error);
-    return res.status(500).json({ message: 'Error downloading PDF.' });
-  }
-},
+  },
 
-  // Rate PDF
+  // Rate a PDF.
   async ratePdf(req, res) {
     const { id } = req.params;
     const { rating } = req.body;
@@ -302,7 +382,7 @@ async downloadPdf(req, res) {
     }
   },
 
-  // Record download history
+  // Record download history.
   async recordHistory(req, res) {
     const { pdfId } = req.body;
     const userId = req.user && req.user.id;
@@ -313,7 +393,7 @@ async downloadPdf(req, res) {
       return res.status(401).json({ message: 'Unauthorized: user not found.' });
     }
     try {
-      await pdfModel.recordHistory(pdfId, userId, req);
+      await helpers.recordDownload(pdfId, userId, req);
       res.status(200).json({ message: 'Download history recorded successfully.' });
     } catch (error) {
       console.error('Error recording download history:', error);
@@ -322,8 +402,6 @@ async downloadPdf(req, res) {
   },
 
   // -------------------- Bookmark Endpoints --------------------
-
-  // Add bookmark
   async bookmarkPdf(req, res) {
     const { id } = req.params;
     const userId = req.user && req.user.id;
@@ -342,7 +420,6 @@ async downloadPdf(req, res) {
     }
   },
 
-  // Remove bookmark
   async removeBookmark(req, res) {
     const { id } = req.params;
     const userId = req.user && req.user.id;
@@ -361,7 +438,6 @@ async downloadPdf(req, res) {
     }
   },
 
-  // Get bookmarks with payment info
   async getBookmarks(req, res) {
     const userId = req.user && req.user.id;
     if (!userId) {
@@ -381,7 +457,6 @@ async downloadPdf(req, res) {
     }
   },
 
-  // Get purchased PDFs with payment info
   async getPurchasedPdfs(req, res) {
     const userId = req.user && req.user.id;
     if (!userId) {
@@ -391,7 +466,13 @@ async downloadPdf(req, res) {
       const purchasedPdfs = await pdfModel.getPurchasedPdfs(userId);
       const pdfsWithProfile = purchasedPdfs.map(pdf => {
         if (pdf.profilePic) {
-          pdf.profilePicBase64 = pdf.profilePic.toString('base64');
+          try {
+            const decryptedPic = decryptBuffer(pdf.profilePic);
+            const decompressedPic = zlib.gunzipSync(decryptedPic);
+            pdf.profilePicBase64 = decompressedPic.toString('base64');
+          } catch (_) {
+            pdf.profilePicBase64 = pdf.profilePic.toString('base64');
+          }
         } else {
           pdf.profilePicBase64 = null;
         }
@@ -407,34 +488,27 @@ async downloadPdf(req, res) {
     }
   },
 
-  // Handle PDF purchase (initialize payment with Paystack)
   async purchasePdf(req, res) {
     const { pdfId } = req.params;
     const userId = req.user && req.user.id;
-  
     if (!userId) {
       return res.status(401).json({ message: 'Unauthorized: User not logged in' });
     }
-  
     try {
       const pdf = await pdfModel.getPdfDetails(pdfId);
       if (!pdf || pdf.length === 0) {
         return res.status(404).json({ message: 'PDF not found' });
       }
-  
       if (pdf[0].is_paid !== 1) {
         return res.status(400).json({ message: 'This PDF is free and does not require payment' });
       }
-  
       const hasPurchased = await pdfModel.checkPurchase(userId, pdfId);
       if (hasPurchased) {
         return res.status(400).json({ message: 'You have already purchased this PDF' });
       }
-  
-      // Prepare payment data for Paystack
       const paymentData = {
         email: req.user.email,
-        amount: Math.round(parseFloat(pdf[0].price) * 100), // Convert to kobo
+        amount: Math.round(parseFloat(pdf[0].price) * 100), // in kobo
         metadata: {
           userId,
           pdfId,
@@ -442,8 +516,6 @@ async downloadPdf(req, res) {
         },
         callback_url: `${process.env.FRONTEND_URL}/payment-callback`,
       };
-  
-      // Initialize transaction using Paystack API
       const paymentResponse = await axios.post(
         'https://api.paystack.co/transaction/initialize',
         paymentData,
@@ -454,7 +526,6 @@ async downloadPdf(req, res) {
           },
         }
       );
-  
       return res.json({
         paymentUrl: paymentResponse.data.data.authorization_url,
         reference: paymentResponse.data.data.reference,
@@ -465,14 +536,12 @@ async downloadPdf(req, res) {
     }
   },
 
-  // Verify payment using Paystack's verification endpoint
   async verifyPayment(req, res) {
     const { reference } = req.body;
     if (!reference) {
       return res.status(400).json({ message: 'Payment reference is required.' });
     }
     try {
-      // Call Paystack's verification API using axios
       const verifyResponse = await axios.get(
         `https://api.paystack.co/transaction/verify/${reference}`,
         {
@@ -482,15 +551,11 @@ async downloadPdf(req, res) {
           },
         }
       );
-  
-      // Check payment status returned by Paystack
       if (
         verifyResponse.data &&
         verifyResponse.data.data &&
         verifyResponse.data.data.status === 'success'
       ) {
-        // Optionally, record the purchase in your database here using:
-        // await pdfModel.recordPurchase(...)
         return res.json({
           success: true,
           message: 'Payment verified successfully',
@@ -505,15 +570,12 @@ async downloadPdf(req, res) {
     }
   },
   
-  // Check purchase status for a given PDF by the current user
   async checkPurchase(req, res) {
     const { pdfId } = req.params;
     const userId = req.user?.id;
-  
     if (!userId) {
       return res.status(401).json({ message: 'Unauthorized: User not logged in.' });
     }
-  
     try {
       const hasPurchased = await pdfModel.checkPurchase(userId, pdfId);
       return res.json({ hasPurchased });
