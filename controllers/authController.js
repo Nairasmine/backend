@@ -62,31 +62,38 @@ const authController = {
     }
   },
 
-  async signup(req, res) {
-    // This signup function can be used for the admin signup route,
-    // which you should restrict so that only one admin can be registered if desired.
-    const { username, email, password } = req.body;
-    if (!username || !email || !password) {
-      return res.status(400).json({ message: 'Username, email, and password are required.' });
-    }
-    try {
-      // Check if an admin account already exists
-      const [existingAdmins] = await db.query("SELECT * FROM users WHERE role = 'admin'");
-      if (existingAdmins.length > 0) {
-        return res.status(400).json({ message: 'Admin account already exists.' });
-      }
-      const hashedPassword = bcrypt.hashSync(password, 10);
-      await db.query(
-        `INSERT INTO users (username, email, password, role, status, created_at)
-         VALUES (?, ?, ?, 'admin', 'active', NOW())`,
-        [username, email, hashedPassword]
-      );
-      res.status(201).json({ message: 'Admin account created successfully.' });
-    } catch (error) {
-      console.error('Error in signup:', error);
-      res.status(500).json({ message: 'Error creating admin account.' });
-    }
-  },
+  // Updated signup function to make the first user an admin
+async signup(req, res) {
+  const { username, email, password } = req.body;
+  if (!username || !email || !password) {
+    return res.status(400).json({ message: 'Username, email, and password are required.' });
+  }
+  
+  try {
+    // Check if any users exist in the database
+    const [userCountResult] = await db.query('SELECT COUNT(*) AS count FROM users');
+    const userCount = userCountResult[0].count;
+    
+    // Determine the role - first user becomes admin
+    const role = userCount === 0 ? 'admin' : 'user';
+    
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    
+    await db.query(
+      `INSERT INTO users (username, email, password, role, status, created_at)
+       VALUES (?, ?, ?, ?, 'active', NOW())`,
+      [username, email, hashedPassword, role]
+    );
+    
+    res.status(201).json({ 
+      message: `Account created successfully.${role === 'admin' ? ' You are the first user, so you have been assigned administrator privileges.' : ''}`,
+      role: role
+    });
+  } catch (error) {
+    console.error('Error in signup:', error);
+    res.status(500).json({ message: 'Error creating account.' });
+  }
+},
 
   async logout(req, res) {
     res.status(200).json({ message: 'Successfully logged out' });

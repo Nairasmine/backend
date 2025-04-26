@@ -4,16 +4,16 @@ const bcrypt = require('bcryptjs');
 const path = require('path');
 
 // --- Constants ---
-const CURRENT_TIMESTAMP = new Date().toISOString();
-const CURRENT_USER = 'Nairasmine';
+const CURRENT_TIMESTAMP = process.env.CURRENT_TIMESTAMP || new Date().toISOString();
+const CURRENT_USER = process.env.CURRENT_USER || 'admin';
 const UPLOAD_FEE_IDENTIFIER = -1;
 
 // Create connection pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || 'Okikiokiki123@',
-  database: process.env.DB_NAME || 'pdf',
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
@@ -70,12 +70,6 @@ const initializeDatabase = async () => {
         INDEX (visibility)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
-
-    // Create dummy PDF record for upload fee transactions.
-    await promisePool.query(`
-      INSERT IGNORE INTO pdfs (id, title, description, file_name, file_size, user_id, visibility, status)
-      VALUES (?, 'Upload Fee', 'Special record for upload fee transactions', 'system.pdf', 0, 1, 'private', 'active')
-    `, [UPLOAD_FEE_IDENTIFIER]);
 
     // Create purchases table.
     await promisePool.query(`
@@ -192,26 +186,8 @@ const initializeDatabase = async () => {
       }
     }
     
-    // Insert default admin user if no user exists.
-    const [userCountResult] = await promisePool.query('SELECT COUNT(*) AS count FROM users');
-    if (userCountResult[0].count === 0) {
-      const hashedPassword = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'Okikiokiki123@', 10);
-      await promisePool.query(
-        `INSERT INTO users (
-          username,
-          password,
-          role,
-          email,
-          created_at,
-          status
-        ) VALUES (?, ?, 'admin', ?, NOW(), 'active')`,
-        [CURRENT_USER, hashedPassword, 'admin@example.com']
-      );
-      console.log('Default admin user created because no users existed.');
-    } else {
-      console.log('Users already exist; skipping default admin creation.');
-    }
-
+    // Removed automatic admin creation - the first user to sign up will be an admin instead
+    
     console.log('Database and tables initialized successfully');
     return promisePool;
   } catch (error) {
