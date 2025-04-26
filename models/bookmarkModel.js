@@ -18,8 +18,6 @@ const bookmarkModel = {
           p.file_name,
           p.created_at,
           p.updated_at,
-          -- Optionally, you can also fetch the cover photo from the PDFs table.
-          -- For example, if you want the cover photo as a Base64 string (MySQL):
           IFNULL(TO_BASE64(p.cover_photo), '') AS cover_photo
         FROM bookmarks b
         INNER JOIN pdfs p ON b.pdf_id = p.id
@@ -33,7 +31,43 @@ const bookmarkModel = {
     }
   },
 
-  // Other bookmark functions (bookmarkPdf, removeBookmark) remain unchanged…
+  /**
+   * Add a new bookmark for a given user and PDF.
+   */
+  async addBookmark(userId, pdfId) {
+    try {
+      const insertQuery = `
+        INSERT INTO bookmarks (user_id, pdf_id)
+        VALUES (?, ?)
+      `;
+      const [result] = await db.query(insertQuery, [userId, pdfId]);
+      return {
+        bookmark_id: result.insertId,
+        user_id: userId,
+        pdf_id: pdfId
+      };
+    } catch (error) {
+      console.error('Error in addBookmark:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Remove a bookmark for a given user and PDF.
+   */
+  async removeBookmark(userId, pdfId) {
+    try {
+      const deleteQuery = `
+        DELETE FROM bookmarks
+        WHERE user_id = ? AND pdf_id = ?
+      `;
+      await db.query(deleteQuery, [userId, pdfId]);
+      return;
+    } catch (error) {
+      console.error('Error in removeBookmark:', error);
+      throw error;
+    }
+  },
 };
 
 module.exports = bookmarkModel;
